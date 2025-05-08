@@ -23,6 +23,8 @@ export class WavStreamPlayer {
   constructor(options?: { finishedPlayingCallback?: () => void; sampleRate?: number });
   connect(): Promise<true>;
   disconnect(): void;
+  pause(): Promise<true>;
+  play(): Promise<true>;
   add16BitPCM(buffer: ArrayBuffer | Int16Array, trackId?: string): Int16Array;
   interrupt(): Promise<{
     trackId: string | null;
@@ -33,6 +35,7 @@ export class WavStreamPlayer {
   getAmplitude(): number;
   startAmplitudeMonitoring(callback: (amplitude: number) => void): void;
   getTrackSampleOffset(interrupt?: boolean): Promise<{ trackId: string | null; offset: number; currentTime: number } | null>;
+  isPlaying: boolean;
 }
 
 export class WavPacker {

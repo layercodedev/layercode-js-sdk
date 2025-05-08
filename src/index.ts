@@ -56,6 +56,7 @@ class LayercodeClient {
   private ws: WebSocket | null;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
+  private vadPausedPlayer: boolean; // Flag to track if VAD paused the player
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
@@ -102,10 +103,25 @@ class LayercodeClient {
         minSpeechFrames: 15,
         preSpeechPadFrames: 30,
         onSpeechStart: () => {
-          console.log('onSpeechStart');
+          // Only pause agent audio if it's currently playing
+          if (this.wavPlayer.isPlaying) {
+            console.log('onSpeechStart: WavPlayer is playing, pausing it.');
+            this.wavPlayer.pause();
+            this.vadPausedPlayer = true; // VAD is responsible for this pause
+          } else {
+            console.log('onSpeechStart: WavPlayer is not playing, VAD will not pause.');
+            this.vadPausedPlayer = false;
+          }
         },
         onSpeechEnd: (arr) => {
-          console.log('onSpeechEnd');
+          // Only resume agent audio if VAD was the one that paused it
+          if (this.vadPausedPlayer) {
+            console.log('onSpeechEnd: VAD paused the player, attempting to resume.');
+            this.wavPlayer.play();
+            this.vadPausedPlayer = false; // Reset flag
+          } else {
+            console.log('onSpeechEnd: VAD did not pause the player, no action taken to resume.');
+          }
         },
       })
         .then((vad) => {
@@ -124,6 +140,7 @@ class LayercodeClient {
     this.agentAudioAmplitude = 0;
     this.sessionId = options.sessionId || null;
     this.pushToTalkActive = false;
+    this.vadPausedPlayer = false;
 
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);

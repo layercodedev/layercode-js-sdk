@@ -20,6 +20,7 @@ export class WavStreamPlayer {
     this.trackSampleOffsets = {};
     this.interruptedTrackIds = {};
     this.finishedPlayingCallback = finishedPlayingCallback;
+    this.isPlaying = false;
   }
 
   /**
@@ -41,6 +42,7 @@ export class WavStreamPlayer {
     analyser.fftSize = 8192;
     analyser.smoothingTimeConstant = 0.1;
     this.analyser = analyser;
+    this.isPlaying = true;
     return true;
   }
 
@@ -107,6 +109,7 @@ export class WavStreamPlayer {
       if (event === "stop") {
         streamNode.disconnect();
         this.stream = null;
+        this.isPlaying = false;
         this.finishedPlayingCallback();
       } else if (event === "offset") {
         const { requestId, trackId, offset } = e.data;
@@ -117,6 +120,7 @@ export class WavStreamPlayer {
     this.analyser.disconnect();
     streamNode.connect(this.analyser);
     this.stream = streamNode;
+    this.isPlaying = true;
     return true;
   }
 
@@ -184,6 +188,61 @@ export class WavStreamPlayer {
   }
 
   /**
+   * Pauses audio playback while preserving audio in the buffer
+   * @returns {Promise<boolean>}
+   */
+  async pause() {
+    if (!this.context || !this.stream || !this.isPlaying) {
+      // Cannot pause if not connected, no stream, or already paused/stopped
+      return false;
+    }
+    
+    this.stream.port.postMessage({ event: 'pause' });
+    this.isPlaying = false;
+    console.log("WavStreamPlayer: Paused via worklet message");
+    return true;
+  }
+  
+  /**
+   * Resumes audio playback from where it was paused
+   * @returns {Promise<boolean>}
+   */
+  async play() {
+    if (!this.context) {
+      // Cannot play if not connected
+      return false;
+    }
+
+    // Ensure the audio context is running, especially if it was auto-suspended by the browser
+    if (this.context.state === 'suspended') {
+      try {
+        await this.context.resume();
+        console.log("WavStreamPlayer: AudioContext resumed");
+      } catch (err) {
+        console.error("Error resuming AudioContext:", err);
+        return false;
+      }
+    }
+
+    if (!this.stream) {
+      // If there's no stream (e.g., after a full stop), play won't do anything
+      // until add16BitPCM is called again, which calls _start()
+      console.log("WavStreamPlayer: No active stream to play. Call add16BitPCM to start a new stream.");
+      return false;
+    }
+    
+    if (this.isPlaying) {
+      // Already playing
+      return true;
+    }
+
+    this.stream.port.postMessage({ event: 'play' });
+    this.isPlaying = true;
+    console.log("WavStreamPlayer: Played via worklet message");
+    return true;
+  }
+
+  /**
    * Disconnects the audio context and cleans up resources
    * @returns {void}
    */
@@ -200,6 +259,8 @@ export class WavStreamPlayer {
     if (this.context) {
       this.context.close().catch((err) => console.error("Error closing audio context:", err));
     }
+    
+    this.isPlaying = false;
   }
 }
 

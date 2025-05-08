@@ -4,6 +4,7 @@ class StreamProcessor extends AudioWorkletProcessor {
     super();
     this.hasStarted = false;
     this.hasInterrupted = false;
+    this.isPaused = false; // New flag for pause state
     this.outputBuffers = [];
     this.bufferLength = 128;
     this.write = { buffer: new Float32Array(this.bufferLength), trackId: null };
@@ -35,6 +36,10 @@ class StreamProcessor extends AudioWorkletProcessor {
           if (payload.event === 'interrupt') {
             this.hasInterrupted = true;
           }
+        } else if (payload.event === 'pause') {
+          this.isPaused = true;
+        } else if (payload.event === 'play') {
+          this.isPaused = false;
         } else {
           throw new Error(\`Unhandled event "\${payload.event}"\`);
         }
@@ -62,26 +67,42 @@ class StreamProcessor extends AudioWorkletProcessor {
     const output = outputs[0];
     const outputChannelData = output[0];
     const outputBuffers = this.outputBuffers;
+
     if (this.hasInterrupted) {
       this.port.postMessage({ event: 'stop' });
-      return false;
-    } else if (outputBuffers.length) {
+      return false; // Stop processing if interrupted
+    }
+
+    if (this.isPaused) {
+      // If paused, output silence but keep the processor alive
+      for (let i = 0; i < outputChannelData.length; i++) {
+        outputChannelData[i] = 0;
+      }
+      return true; // Continue processing (silence)
+    }
+
+    if (outputBuffers.length > 0) {
       this.hasStarted = true;
       const { buffer, trackId } = outputBuffers.shift();
       for (let i = 0; i < outputChannelData.length; i++) {
-        outputChannelData[i] = buffer[i] || 0;
+        outputChannelData[i] = buffer[i] || 0; // Fill output with buffer data or 0 if buffer is shorter
       }
       if (trackId) {
         this.trackSampleOffsets[trackId] =
-          this.trackSampleOffsets[trackId] || 0;
-        this.trackSampleOffsets[trackId] += buffer.length;
+          (this.trackSampleOffsets[trackId] || 0) + buffer.length;
       }
-      return true;
+      return true; // Continue processing
     } else if (this.hasStarted) {
+      // No more buffers and playback had started and is not paused
       this.port.postMessage({ event: 'stop' });
-      return false;
+      this.hasStarted = false; // Reset for next playback
+      return false; // Stop processing
     } else {
-      return true;
+      // Not started, not paused, no buffers - output silence and wait for data
+      for (let i = 0; i < outputChannelData.length; i++) {
+        outputChannelData[i] = 0;
+      }
+      return true; // Keep processor alive
     }
   }
 }
