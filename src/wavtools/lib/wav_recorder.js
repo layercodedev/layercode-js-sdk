@@ -150,6 +150,14 @@ export class WavRecorder {
   }
 
   /**
+   * Get the MediaStream instance
+   * @returns {MediaStream|null} The audio stream or null if not initialized
+   */
+  getStream() {
+    return this.stream;
+  }
+
+  /**
    * Retrieves the current status of the recording
    * @returns {"ended"|"paused"|"recording"}
    */

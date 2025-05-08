@@ -16,6 +16,7 @@ export class WavRecorder {
   startAmplitudeMonitoring(callback: (amplitude: number) => void): void;
   getStatus(): 'ended' | 'paused' | 'recording';
   getSampleRate(): number;
+  getStream(): MediaStream | null;
 }
 
 export class WavStreamPlayer {
