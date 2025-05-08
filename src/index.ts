@@ -95,8 +95,8 @@ class LayercodeClient {
       MicVAD.new({
         stream: this.wavRecorder.getStream() || undefined,
         model: 'v5',
-        baseAssetPath: '/',
-        onnxWASMBasePath: '/',
+        // baseAssetPath: '/', // Use if bundling model locally
+        // onnxWASMBasePath: '/', // Use if bundling model locally
         positiveSpeechThreshold: 0.4,
         negativeSpeechThreshold: 0.4,
         minSpeechFrames: 15,

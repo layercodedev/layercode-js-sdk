@@ -322,10 +322,12 @@ export class WavRecorder {
     try {
       // Use sensible getUserMedia audio options to improve voice quality
       const config = {
-        channelCount: 1,
-        echoCancellation: true,
-        autoGainControl: true,
-        noiseSuppression: true,
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          autoGainControl: true,
+          noiseSuppression: true,
+        }
       };
       if (deviceId) {
         config.audio.deviceId = { exact: deviceId };
