@@ -102,7 +102,7 @@ class LayercodeClient {
         negativeSpeechThreshold: 0.4,
         redemptionFrames: 8,
         minSpeechFrames: 20,
-        preSpeechPadFrames: 1, //30,
+        preSpeechPadFrames: 0,
         onSpeechStart: () => {
           // Only pause agent audio if it's currently playing
           if (this.wavPlayer.isPlaying) {
