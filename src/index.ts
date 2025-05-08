@@ -1,5 +1,6 @@
 /* eslint-env browser */
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
+import { MicVAD } from '@ricky0123/vad-web';
 import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
 import {
   LayercodeMessage,
@@ -25,6 +26,8 @@ interface LayercodeClientOptions {
   authorizeSessionEndpoint: string;
   /** Metadata to send with webhooks */
   metadata?: Record<string, any>;
+  /** Enable/disable voice activity detector (VAD) which improves turn taking */
+  vadEnabled?: boolean;
   /** Callback when connection is established */
   onConnect?: ({ sessionId }: { sessionId: string | null }) => void;
   /** Callback when connection is closed */
@@ -49,6 +52,7 @@ class LayercodeClient {
   private options: Required<LayercodeClientOptions>;
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
+  private vad: MicVAD | null;
   private ws: WebSocket | null;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
@@ -68,6 +72,7 @@ class LayercodeClient {
       sessionId: options.sessionId || null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
       metadata: options.metadata || {},
+      vadEnabled: options.vadEnabled || true,
       onConnect: options.onConnect || (() => {}),
       onDisconnect: options.onDisconnect || (() => {}),
       onError: options.onError || (() => {}),
@@ -85,6 +90,33 @@ class LayercodeClient {
       finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
       sampleRate: 16000, // TODO should be set my fetched pipeline config
     });
+    this.vad = null;
+    if (this.options.vadEnabled) {
+      MicVAD.new({
+        stream: this.wavRecorder.getStream() || undefined,
+        model: 'v5',
+        baseAssetPath: '/',
+        onnxWASMBasePath: '/',
+        positiveSpeechThreshold: 0.4,
+        negativeSpeechThreshold: 0.4,
+        minSpeechFrames: 15,
+        preSpeechPadFrames: 30,
+        onSpeechStart: () => {
+          console.log('onSpeechStart');
+        },
+        onSpeechEnd: (arr) => {
+          console.log('onSpeechEnd');
+        },
+      })
+        .then((vad) => {
+          this.vad = vad;
+          this.vad.start();
+          console.log('VAD started');
+        })
+        .catch((error) => {
+          console.error('Error initializing VAD:', error);
+        });
+    }
 
     this.ws = null;
     this.status = 'disconnected';
@@ -325,6 +357,14 @@ class LayercodeClient {
     this.wavRecorder.quit();
     this.wavPlayer.disconnect();
     this.ws?.close();
+  }
+
+  /**
+   * Gets the microphone MediaStream used by this client
+   * @returns {MediaStream|null} The microphone stream or null if not initialized
+   */
+  getStream(): MediaStream | null {
+    return this.wavRecorder.getStream();
   }
 }
 

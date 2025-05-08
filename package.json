@@ -42,5 +42,9 @@
     "rollup": "^4.0.0",
     "tslib": "^2.5.0",
     "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.24",
+    "onnxruntime-web": "^1.21.1"
   }
 }
