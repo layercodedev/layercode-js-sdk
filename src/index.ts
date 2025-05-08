@@ -100,8 +100,9 @@ class LayercodeClient {
         // onnxWASMBasePath: '/', // Use if bundling model locally
         positiveSpeechThreshold: 0.4,
         negativeSpeechThreshold: 0.4,
-        minSpeechFrames: 15,
-        preSpeechPadFrames: 30,
+        redemptionFrames: 8,
+        minSpeechFrames: 20,
+        preSpeechPadFrames: 1, //30,
         onSpeechStart: () => {
           // Only pause agent audio if it's currently playing
           if (this.wavPlayer.isPlaying) {
@@ -113,15 +114,18 @@ class LayercodeClient {
             this.vadPausedPlayer = false;
           }
         },
-        onSpeechEnd: (arr) => {
-          // Only resume agent audio if VAD was the one that paused it
+        onVADMisfire: () => {
+          // If the speech detected was for less than minSpeechFrames, this is called instead of onSpeechEnd, and we should resume the assistant audio as it was a false interruption
           if (this.vadPausedPlayer) {
-            console.log('onSpeechEnd: VAD paused the player, attempting to resume.');
+            console.log('onVADMisfire: VAD paused the player, attempting to resume.');
             this.wavPlayer.play();
             this.vadPausedPlayer = false; // Reset flag
           } else {
-            console.log('onSpeechEnd: VAD did not pause the player, no action taken to resume.');
+            console.log('onVADMisfire: VAD did not pause the player, no action taken to resume.');
           }
+        },
+        onSpeechEnd: () => {
+          // We don't take any action here, as the user speech is for more than minSpeechFrames and is very likely to result in a new turn start from the transcriber
         },
       })
         .then((vad) => {
@@ -217,6 +221,11 @@ class LayercodeClient {
             console.log('interrupting assistant audio, as user turn has started and pushToTalkActive is false');
             await this._clientInterruptAssistantReplay();
           }
+          // if (message.role === 'assistant') {
+          //   // Clear the buffer of audio when the assisatnt starts a new turn, as it may have been paused previously by VAD, leaving some audio frames in the buffer.
+          //   console.log('Clearing audio buffer as assistant turn has started');
+          //   await this._clientInterruptAssistantReplay();
+          // }
           break;
 
         case 'response.audio':
