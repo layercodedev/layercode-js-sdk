@@ -28,6 +28,8 @@ interface LayercodeClientOptions {
   metadata?: Record<string, any>;
   /** Enable/disable voice activity detector (VAD) which improves turn taking */
   vadEnabled?: boolean;
+  /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
+  vadResumeDelay?: number;
   /** Callback when connection is established */
   onConnect?: ({ sessionId }: { sessionId: string | null }) => void;
   /** Callback when connection is closed */
@@ -74,6 +76,7 @@ class LayercodeClient {
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
       metadata: options.metadata || {},
       vadEnabled: options.vadEnabled || true,
+      vadResumeDelay: options.vadResumeDelay || 500,
       onConnect: options.onConnect || (() => {}),
       onDisconnect: options.onDisconnect || (() => {}),
       onError: options.onError || (() => {}),
@@ -98,10 +101,10 @@ class LayercodeClient {
         model: 'v5',
         // baseAssetPath: '/', // Use if bundling model locally
         // onnxWASMBasePath: '/', // Use if bundling model locally
-        positiveSpeechThreshold: 0.4,
-        negativeSpeechThreshold: 0.4,
-        redemptionFrames: 8,
-        minSpeechFrames: 20,
+        positiveSpeechThreshold: 0.3,
+        negativeSpeechThreshold: 0.2,
+        redemptionFrames: 25, // Number of frames of silence before onVADMisfire or onSpeechEnd is called. Effectively a delay before restarting.
+        minSpeechFrames: 15,
         preSpeechPadFrames: 0,
         onSpeechStart: () => {
           // Only pause agent audio if it's currently playing
@@ -111,22 +114,35 @@ class LayercodeClient {
             this.vadPausedPlayer = true; // VAD is responsible for this pause
           } else {
             console.log('onSpeechStart: WavPlayer is not playing, VAD will not pause.');
-            this.vadPausedPlayer = false;
           }
         },
         onVADMisfire: () => {
-          // If the speech detected was for less than minSpeechFrames, this is called instead of onSpeechEnd, and we should resume the assistant audio as it was a false interruption
+          // If the speech detected was for less than minSpeechFrames, this is called instead of onSpeechEnd, and we should resume the assistant audio as it was a false interruption. We include a configurable delay so the assistant isn't too quick to start speaking again.
           if (this.vadPausedPlayer) {
-            console.log('onVADMisfire: VAD paused the player, attempting to resume.');
+            console.log('onSpeechEnd: VAD paused the player, resuming');
             this.wavPlayer.play();
             this.vadPausedPlayer = false; // Reset flag
+
+            // Option to extend delay in the case where the transcriber takes longer to detect a new turn
+            // console.log('onVADMisfire: VAD paused the player, resuming in ' + this.options.vadResumeDelay + 'ms');
+            // // Add configurable delay before resuming playback
+            // setTimeout(() => {
+            //   this.wavPlayer.play();
+            //   this.vadPausedPlayer = false; // Reset flag
+            // }, this.options.vadResumeDelay);
           } else {
             console.log('onVADMisfire: VAD did not pause the player, no action taken to resume.');
           }
         },
-        onSpeechEnd: () => {
-          // We don't take any action here, as the user speech is for more than minSpeechFrames and is very likely to result in a new turn start from the transcriber
-        },
+        // onSpeechEnd: () => {
+        //   if (this.vadPausedPlayer) {
+        //     console.log('onSpeechEnd: VAD paused the player, resuming');
+        //     this.wavPlayer.play();
+        //     this.vadPausedPlayer = false; // Reset flag
+        //   } else {
+        //     console.log('onSpeechEnd: VAD did not pause the player, not resuming.');
+        //   }
+        // },
       })
         .then((vad) => {
           this.vad = vad;
