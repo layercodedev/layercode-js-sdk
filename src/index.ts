@@ -16,8 +16,6 @@ interface LayercodeClientOptions {
   authorizeSessionEndpoint: string;
   /** Metadata to send with webhooks */
   metadata?: Record<string, any>;
-  /** Enable/disable voice activity detector (VAD) which improves turn taking */
-  vadEnabled?: boolean;
   /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
@@ -67,7 +65,6 @@ class LayercodeClient {
       sessionId: options.sessionId || null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
       metadata: options.metadata || {},
-      vadEnabled: options.vadEnabled || true,
       vadResumeDelay: options.vadResumeDelay || 500,
       onConnect: options.onConnect || (() => {}),
       onDisconnect: options.onDisconnect || (() => {}),
@@ -103,8 +100,8 @@ class LayercodeClient {
   }
 
   private _initializeVAD(): void {
-    console.log('initializing VAD', { vadEnabled: this.options.vadEnabled, pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt });
-    if (this.options.vadEnabled && !this.pushToTalkEnabled && this.canInterrupt) {
+    console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt });
+    if (!this.pushToTalkEnabled && this.canInterrupt) {
       MicVAD.new({
         stream: this.wavRecorder.getStream() || undefined,
         model: 'v5',
