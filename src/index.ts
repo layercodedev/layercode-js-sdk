@@ -2,7 +2,14 @@
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
 import { MicVAD } from '@ricky0123/vad-web';
 import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
-import { ClientMessage, ServerMessage, ClientAudioMessage, ClientTriggerTurnMessage, ClientTriggerResponseAudioReplayFinishedMessage } from './interfaces.js';
+import {
+  ClientMessage,
+  ServerMessage,
+  ClientAudioMessage,
+  ClientTriggerTurnMessage,
+  ClientTriggerResponseAudioReplayFinishedMessage,
+  ClientVadEventsMessage,
+} from './interfaces.js';
 
 interface PipelineConfig {
   transcription: {
@@ -57,6 +64,7 @@ class LayercodeClient {
   private pushToTalkEnabled: boolean;
   private canInterrupt: boolean;
   private vadPausedPlayer: boolean; // Flag to track if VAD paused the player
+  private userIsSpeaking: boolean;
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
@@ -101,6 +109,7 @@ class LayercodeClient {
     this.vadPausedPlayer = false;
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
+    this.userIsSpeaking = false;
 
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
@@ -110,6 +119,12 @@ class LayercodeClient {
   private _initializeVAD(): void {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt });
     if (!this.pushToTalkEnabled && this.canInterrupt) {
+      const timeout = setTimeout(() => {
+        console.log('silero vad model timeout');
+        // TODO: send message to server to indicate that the vad model timed out
+        this.userIsSpeaking = true; // allow audio to be sent to the server
+      }, 2000);
+
       MicVAD.new({
         stream: this.wavRecorder.getStream() || undefined,
         model: 'v5',
@@ -129,9 +144,16 @@ class LayercodeClient {
           } else {
             console.log('onSpeechStart: WavPlayer is not playing, VAD will not pause.');
           }
+          this.userIsSpeaking = true;
+          console.log('onSpeechStart: sending vad_start');
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_start',
+          } as ClientVadEventsMessage);
         },
         onVADMisfire: () => {
           // If the speech detected was for less than minSpeechFrames, this is called instead of onSpeechEnd, and we should resume the assistant audio as it was a false interruption. We include a configurable delay so the assistant isn't too quick to start speaking again.
+          this.userIsSpeaking = false;
           if (this.vadPausedPlayer) {
             console.log('onSpeechEnd: VAD paused the player, resuming');
             this.wavPlayer.play();
@@ -148,17 +170,23 @@ class LayercodeClient {
             console.log('onVADMisfire: VAD did not pause the player, no action taken to resume.');
           }
         },
-        // onSpeechEnd: () => {
-        //   if (this.vadPausedPlayer) {
-        //     console.log('onSpeechEnd: VAD paused the player, resuming');
-        //     this.wavPlayer.play();
-        //     this.vadPausedPlayer = false; // Reset flag
-        //   } else {
-        //     console.log('onSpeechEnd: VAD did not pause the player, not resuming.');
-        //   }
-        // },
+        onSpeechEnd: () => {
+          this.userIsSpeaking = false;
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_end',
+          } as ClientVadEventsMessage);
+          //   if (this.vadPausedPlayer) {
+          //     console.log('onSpeechEnd: VAD paused the player, resuming');
+          //     this.wavPlayer.play();
+          //     this.vadPausedPlayer = false; // Reset flag
+          //   } else {
+          //     console.log('onSpeechEnd: VAD did not pause the player, not resuming.');
+          //   }
+        },
       })
         .then((vad) => {
+          clearTimeout(timeout);
           this.vad = vad;
           this.vad.start();
           console.log('VAD started');
@@ -277,10 +305,12 @@ class LayercodeClient {
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
       const base64 = arrayBufferToBase64(data.mono);
-      this._wsSend({
-        type: 'client.audio',
-        content: base64,
-      } as ClientAudioMessage);
+      if (this.userIsSpeaking) {
+        this._wsSend({
+          type: 'client.audio',
+          content: base64,
+        } as ClientAudioMessage);
+      }
     } catch (error) {
       console.error('Error processing audio:', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));

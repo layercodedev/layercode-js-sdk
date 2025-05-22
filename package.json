@@ -2,7 +2,7 @@
   "author": "Layercode",
   "license": "MIT",
   "name": "@layercode/js-sdk",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Layercode JavaScript SDK for browser usage",
   "type": "module",
   "main": "dist/layercode-js-sdk.esm.js",
