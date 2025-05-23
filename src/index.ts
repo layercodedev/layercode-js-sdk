@@ -124,17 +124,28 @@ class LayercodeClient {
       return;
     }
 
+    const timeout = setTimeout(() => {
+      console.log('silero vad model timeout');
+      // TODO: send message to server to indicate that the vad model timed out
+      this.userIsSpeaking = true; // allow audio to be sent to the server
+    }, 2000);
     if (!this.canInterrupt) {
       MicVAD.new({
         stream: this.wavRecorder.getStream() || undefined,
         model: 'v5',
-        // baseAssetPath: '/', // Use if bundling model locally
-        // onnxWASMBasePath: '/', // Use if bundling model locally
         positiveSpeechThreshold: 0.3,
         negativeSpeechThreshold: 0.2,
         redemptionFrames: 25, // Number of frames of silence before onVADMisfire or onSpeechEnd is called. Effectively a delay before restarting.
         minSpeechFrames: 15,
         preSpeechPadFrames: 0,
+        onSpeechStart: () => {
+          if (!this.wavPlayer.isPlaying) {
+            this.userIsSpeaking = true;
+          }
+        },
+        onVADMisfire: () => {
+          this.userIsSpeaking = false;
+        },
         onSpeechEnd: () => {
           this.userIsSpeaking = false;
           this._wsSend({
@@ -152,11 +163,6 @@ class LayercodeClient {
           console.error('Error initializing VAD:', error);
         });
     } else {
-      const timeout = setTimeout(() => {
-        console.log('silero vad model timeout');
-        // TODO: send message to server to indicate that the vad model timed out
-        this.userIsSpeaking = true; // allow audio to be sent to the server
-      }, 2000);
       MicVAD.new({
         stream: this.wavRecorder.getStream() || undefined,
         model: 'v5',
@@ -279,13 +285,9 @@ class LayercodeClient {
           console.log('received turn.start from server');
           console.log(message);
           if (message.role === 'user' && !this.pushToTalkEnabled && this.canInterrupt) {
-            if (this.canInterrupt) {
-              // Interrupt any playing assistant audio if this is a turn trigged by the server (and not push to talk, which will have already called interrupt)
-              console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
-              await this._clientInterruptAssistantReplay();
-            } else {
-              this.userIsSpeaking = true;
-            }
+            // Interrupt any playing assistant audio if this is a turn trigged by the server (and not push to talk, which will have already called interrupt)
+            console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
+            await this._clientInterruptAssistantReplay();
           }
           // if (message.role === 'assistant') {
           //   // Clear the buffer of audio when the assisatnt starts a new turn, as it may have been paused previously by VAD, leaving some audio frames in the buffer.
@@ -326,12 +328,7 @@ class LayercodeClient {
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
       const base64 = arrayBufferToBase64(data.mono);
-      let sendAudio = true;
-      if (this.pushToTalkEnabled) {
-        sendAudio = this.pushToTalkActive;
-      } else if (this.canInterrupt) {
-        sendAudio = this.userIsSpeaking;
-      }
+      const sendAudio = this.pushToTalkEnabled ? this.pushToTalkActive : this.userIsSpeaking;
 
       if (sendAudio) {
         this._wsSend({
