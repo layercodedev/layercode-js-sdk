@@ -155,6 +155,7 @@ class LayercodeClient {
         },
       })
         .then((vad) => {
+          clearTimeout(timeout);
           this.vad = vad;
           this.vad.start();
           console.log('VAD started');
