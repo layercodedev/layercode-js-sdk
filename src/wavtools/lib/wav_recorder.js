@@ -459,11 +459,35 @@ export class WavRecorder {
   }
 
   /**
-   * Pauses the recording
-   * Keeps microphone stream open but halts storage of audio
+   * Flushes any remaining audio data as a final chunk and stops recording
    * @returns {Promise<true>}
    */
-  async pause() {
+  async flush() {
+    if (!this.processor) {
+      throw new Error('Session ended: please call .begin() first');
+    } else if (!this.recording) {
+      throw new Error('Not recording: please call .record() first');
+    }
+    if (this._chunkProcessorBuffer.raw.byteLength) {
+      this._chunkProcessor(this._chunkProcessorBuffer);
+      this._chunkProcessorBuffer = {
+        raw: new ArrayBuffer(0),
+        mono: new ArrayBuffer(0),
+      };
+    }
+    this.log('Flushing ...');
+    await this._event('flush');
+    this.recording = false;
+    return true;
+  }
+
+  /**
+   * Pauses the recording
+   * Keeps microphone stream open but halts storage of audio
+   * @param {boolean} [flush=true] Whether to flush remaining audio data before pausing
+   * @returns {Promise<true>}
+   */
+  async pause(flush = true) {
     if (!this.processor) {
       throw new Error('Session ended: please call .begin() first');
     } else if (!this.recording) {
@@ -471,9 +495,15 @@ export class WavRecorder {
     }
     if (this._chunkProcessorBuffer.raw.byteLength) {
       this._chunkProcessor(this._chunkProcessorBuffer);
+      if (!flush) {
+        this._chunkProcessorBuffer = {
+          raw: new ArrayBuffer(0),
+          mono: new ArrayBuffer(0),
+        };
+      }
     }
-    this.log('Pausing ...');
-    await this._event('stop');
+    this.log(flush ? 'Pausing with flush ...' : 'Pausing ...');
+    await this._event(flush ? 'flush' : 'stop');
     this.recording = false;
     return true;
   }

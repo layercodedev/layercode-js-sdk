@@ -126,6 +126,30 @@ class AudioProcessor extends AudioWorkletProcessor {
       case 'stop':
         this.recording = false;
         break;
+      case 'flush':
+        this.recording = false;
+        if (this.chunks.length > 0) {
+          console.log(\`[WORKLET FLUSH] Processing \${this.chunks.length} chunks for flush\`);
+          // Send remaining chunks as a final chunk
+          const channels = this.readChannelData(this.chunks);
+          const { float32Array, meanValues } = this.formatAudioData(channels);
+          const rawAudioData = this.floatTo16BitPCM(float32Array);
+          const monoAudioData = this.floatTo16BitPCM(meanValues);
+          console.log(\`[WORKLET FLUSH] Sending flush chunk with \${monoAudioData.byteLength} bytes\`);
+          this.port.postMessage({
+            event: 'chunk',
+            data: {
+              mono: monoAudioData,
+              raw: rawAudioData,
+            },
+          });
+          // Clear chunks after flushing
+          this.chunks = [];
+          console.log(\`[WORKLET FLUSH] Chunks cleared, flush chunk sent\`);
+        } else {
+          console.log(\`[WORKLET FLUSH] No chunks to flush\`);
+        }
+        break;
       case 'clear':
         this.initialize();
         break;
@@ -147,6 +171,7 @@ class AudioProcessor extends AudioWorkletProcessor {
     const { float32Array, meanValues } = this.formatAudioData(channels);
     const rawAudioData = this.floatTo16BitPCM(float32Array);
     const monoAudioData = this.floatTo16BitPCM(meanValues);
+    console.log(\`[WORKLET SEND] Sending regular chunk with \${monoAudioData.byteLength} bytes\`);
     this.port.postMessage({
       event: 'chunk',
       data: {
@@ -198,6 +223,7 @@ class AudioProcessor extends AudioWorkletProcessor {
       // internals will reuse the same buffer to hold each input
       const chunk = inputs.map((input) => input.slice(sliceIndex));
       this.chunks.push(chunk);
+      console.log(\`[WORKLET CHUNK] Added chunk to buffer (total chunks: \${this.chunks.length})\`);
       this.sendChunk(chunk);
     }
     return true;

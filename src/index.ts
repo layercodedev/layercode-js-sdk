@@ -65,6 +65,7 @@ class LayercodeClient {
   private canInterrupt: boolean;
   private vadPausedPlayer: boolean; // Flag to track if VAD paused the player
   private userIsSpeaking: boolean;
+  private wasSendingAudio: boolean; // Track previous audio sending state
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
@@ -110,6 +111,7 @@ class LayercodeClient {
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
+    this.wasSendingAudio = false;
 
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
@@ -330,16 +332,59 @@ class LayercodeClient {
     try {
       const base64 = arrayBufferToBase64(data.mono);
       const sendAudio = this.pushToTalkEnabled ? this.pushToTalkActive : this.userIsSpeaking;
+      const audioDataSize = data.mono.length;
 
-      if (sendAudio) {
+      // Log state changes
+      if (this.wasSendingAudio !== sendAudio) {
+        console.log(`[AUDIO STATE] Transition detected: wasSendingAudio=${this.wasSendingAudio} -> sendAudio=${sendAudio} (pushToTalk=${this.pushToTalkEnabled}, active=${this.pushToTalkActive}, userSpeaking=${this.userIsSpeaking})`);
+      }
+
+      // Always send audio if we're in a sending state OR if this is the previous state (to ensure flush chunks are sent)
+      const shouldSendChunk = sendAudio || this.wasSendingAudio;
+      console.log(`[AUDIO CHUNK] Size: ${audioDataSize}, sendAudio: ${sendAudio}, wasSendingAudio: ${this.wasSendingAudio}, shouldSend: ${shouldSendChunk}`);
+
+      if (shouldSendChunk) {
         this._wsSend({
           type: 'client.audio',
           content: base64,
         } as ClientAudioMessage);
+        console.log(`[AUDIO SENT] Chunk sent to server (size: ${audioDataSize})`);
+      } else {
+        console.log(`[AUDIO BLOCKED] Chunk not sent (size: ${audioDataSize})`);
+      }
+
+      // Check if we're transitioning from sending audio to not sending audio
+      if (this.wasSendingAudio && !sendAudio) {
+        console.log(`[FLUSH START] Initiating flush operation`);
+        // Flush any remaining audio data when stopping transmission, then update state
+        this._flushAudioOnTransition().finally(() => {
+          // Update state after flush completes to ensure the flush chunk was sent with wasSendingAudio=true
+          console.log(`[FLUSH COMPLETE] State updated: wasSendingAudio=${this.wasSendingAudio} -> ${sendAudio}`);
+          this.wasSendingAudio = sendAudio;
+        });
+      } else {
+        // Update the previous state immediately if not transitioning
+        this.wasSendingAudio = sendAudio;
       }
     } catch (error) {
       console.error('Error processing audio:', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  /**
+   * Handles flushing audio when transitioning from sending to not sending
+   * @private
+   */
+  private async _flushAudioOnTransition(): Promise<void> {
+    try {
+      console.log(`[FLUSH] Calling wavRecorder.flush()`);
+      const startTime = performance.now();
+      await this.wavRecorder.flush();
+      const endTime = performance.now();
+      console.log(`[FLUSH] wavRecorder.flush() completed in ${(endTime - startTime).toFixed(2)}ms`);
+    } catch (error: unknown) {
+      console.error('[FLUSH ERROR] Error flushing audio recorder:', error);
     }
   }
 

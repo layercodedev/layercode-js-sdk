@@ -2,7 +2,8 @@ export class WavRecorder {
   constructor(options?: { sampleRate?: number; outputToSpeakers?: boolean; debug?: boolean });
   begin(deviceId?: string): Promise<true>;
   record(chunkProcessor?: (data: { mono: Int16Array; raw: Int16Array }) => any, chunkSize?: number): Promise<true>;
-  pause(): Promise<true>;
+  flush(): Promise<true>;
+  pause(flush?: boolean): Promise<true>;
   end(): Promise<import('./lib/wav_packer.js').WavPackerAudioType>;
   clear(): Promise<true>;
   read(): Promise<{ meanValues: Float32Array; channels: Array<Float32Array> }>;
