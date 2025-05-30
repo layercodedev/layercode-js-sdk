@@ -65,6 +65,7 @@ class LayercodeClient {
   private canInterrupt: boolean;
   private vadPausedPlayer: boolean; // Flag to track if VAD paused the player
   private userIsSpeaking: boolean;
+  private endUserTurn: boolean;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   _websocketUrl: string;
@@ -112,6 +113,7 @@ class LayercodeClient {
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
+    this.endUserTurn = false;
     this.recorderStarted = false;
     this.readySent = false;
 
@@ -151,11 +153,7 @@ class LayercodeClient {
           this.userIsSpeaking = false;
         },
         onSpeechEnd: () => {
-          this.userIsSpeaking = false;
-          this._wsSend({
-            type: 'vad_events',
-            event: 'vad_end',
-          } as ClientVadEventsMessage);
+          this.endUserTurn = true; // Set flag to indicate that the user turn has ended, so we can send a vad_end event to the server
         },
       })
         .then((vad) => {
@@ -340,6 +338,15 @@ class LayercodeClient {
           type: 'client.audio',
           content: base64,
         } as ClientAudioMessage);
+
+        if (this.endUserTurn) {
+          this.endUserTurn = false;
+          this.userIsSpeaking = false; // Reset userIsSpeaking to false so we don't send any more audio to the server
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_end',
+          } as ClientVadEventsMessage);
+        }
       }
     } catch (error) {
       console.error('Error processing audio:', error);
