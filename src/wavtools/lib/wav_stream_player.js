@@ -24,6 +24,24 @@ export class WavStreamPlayer {
   }
 
   /**
+   * Clears interrupted track IDs to prevent memory leaks
+   * @param {string[]} [keepTrackIds] - Track IDs to keep in the interrupted list
+   */
+  clearInterruptedTracks(keepTrackIds = []) {
+    if (keepTrackIds.length === 0) {
+      this.interruptedTrackIds = {};
+    } else {
+      const newInterruptedTracks = {};
+      for (const trackId of keepTrackIds) {
+        if (this.interruptedTrackIds[trackId]) {
+          newInterruptedTracks[trackId] = true;
+        }
+      }
+      this.interruptedTrackIds = newInterruptedTracks;
+    }
+  }
+
+  /**
    * Connects the audio context and enables output to speakers
    * @returns {Promise<true>}
    */

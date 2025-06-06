@@ -82,13 +82,13 @@ class LayercodeClient implements ILayercodeClient {
   private pushToTalkActive: boolean;
   private pushToTalkEnabled: boolean;
   private canInterrupt: boolean;
-  private vadPausedPlayer: boolean; // Flag to track if VAD paused the player
   private userIsSpeaking: boolean;
   private endUserTurn: boolean;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnText: string; // Track accumulated text for current turn
   private currentTurnId: string | null; // Track current turn ID
+  private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
@@ -131,7 +131,6 @@ class LayercodeClient implements ILayercodeClient {
     this.agentAudioAmplitude = 0;
     this.sessionId = options.sessionId || null;
     this.pushToTalkActive = false;
-    this.vadPausedPlayer = false;
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
@@ -140,6 +139,7 @@ class LayercodeClient implements ILayercodeClient {
     this.readySent = false;
     this.currentTurnText = '';
     this.currentTurnId = null;
+    this.audioBuffer = [];
 
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
@@ -170,17 +170,52 @@ class LayercodeClient implements ILayercodeClient {
         minSpeechFrames: 15,
         preSpeechPadFrames: 0,
         onSpeechStart: () => {
-          if (!this.wavPlayer.isPlaying) {
-            this.userIsSpeaking = true;
-            this.options.onUserIsSpeakingChange(true);
-          }
+          this.userIsSpeaking = true;
+          this.options.onUserIsSpeakingChange(true);
+          console.log('onSpeechStart: sending vad_start');
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_start',
+          } as ClientVadEventsMessage);
         },
         onVADMisfire: () => {
+          console.log('onVADMisfire: Short utterance detected, resuming bot');
+          this.audioBuffer = []; // Clear buffer on misfire
           this.userIsSpeaking = false;
           this.options.onUserIsSpeakingChange(false);
+
+          // Send vad_end to indicate the short utterance is over
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_end',
+          } as ClientVadEventsMessage);
+
+          // End the user's turn
+          this._wsSend({
+            type: 'trigger.turn.end',
+            role: 'user',
+          } as ClientTriggerTurnMessage);
+
+          // Resume bot audio if it was playing
+          if (!this.wavPlayer.isPlaying) {
+            console.log('onVADMisfire: Resuming bot audio');
+            this.wavPlayer.play();
+          }
         },
         onSpeechEnd: () => {
-          this.endUserTurn = true; // Set flag to indicate that the user turn has ended, so we can send a vad_end event to the server
+          console.log('onSpeechEnd: sending vad_end');
+          this.endUserTurn = true; // Set flag to indicate that the user turn has ended
+          this.audioBuffer = []; // Clear buffer on speech end
+          this.userIsSpeaking = false;
+          this.options.onUserIsSpeakingChange(false);
+          console.log('onSpeechEnd: State after update - endUserTurn:', this.endUserTurn, 'userIsSpeaking:', this.userIsSpeaking);
+
+          // Send vad_end immediately instead of waiting for next audio chunk
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_end',
+          } as ClientVadEventsMessage);
+          this.endUserTurn = false; // Reset the flag after sending vad_end
         },
       })
         .then((vad) => {
@@ -201,39 +236,59 @@ class LayercodeClient implements ILayercodeClient {
         positiveSpeechThreshold: 0.3,
         negativeSpeechThreshold: 0.2,
         redemptionFrames: 25, // Number of frames of silence before onVADMisfire or onSpeechEnd is called. Effectively a delay before restarting.
-        minSpeechFrames: 15,
+        minSpeechFrames: 5,
         preSpeechPadFrames: 0,
         onSpeechStart: () => {
           // Only pause agent audio if it's currently playing
           if (this.wavPlayer.isPlaying) {
             console.log('onSpeechStart: WavPlayer is playing, pausing it.');
             this.wavPlayer.pause();
-            this.vadPausedPlayer = true; // VAD is responsible for this pause
           } else {
             console.log('onSpeechStart: WavPlayer is not playing, VAD will not pause.');
           }
-          this.userIsSpeaking = true;
-          this.options.onUserIsSpeakingChange(true);
           console.log('onSpeechStart: sending vad_start');
           this._wsSend({
             type: 'vad_events',
             event: 'vad_start',
           } as ClientVadEventsMessage);
+          this.userIsSpeaking = true;
+          this.options.onUserIsSpeakingChange(true);
+          this.endUserTurn = false; // Reset endUserTurn when speech starts
+          console.log('onSpeechStart: State after update - endUserTurn:', this.endUserTurn, 'userIsSpeaking:', this.userIsSpeaking);
         },
         onVADMisfire: () => {
           // If the speech detected was for less than minSpeechFrames, this is called instead of onSpeechEnd, and we should resume the assistant audio as it was a false interruption. We include a configurable delay so the assistant isn't too quick to start speaking again.
           this.userIsSpeaking = false;
+          this.audioBuffer = []; // Clear buffer on misfire
           this.options.onUserIsSpeakingChange(false);
-          if (this.vadPausedPlayer) {
-            console.log('onSpeechEnd: VAD paused the player, resuming');
-            this.wavPlayer.play();
-            this.vadPausedPlayer = false; // Reset flag
-          } else {
-            console.log('onVADMisfire: VAD did not pause the player, no action taken to resume.');
-          }
+
+          // Add the missing delay before resuming to prevent race conditions
+          setTimeout(() => {
+            if (!this.wavPlayer.isPlaying) {
+              console.log('onVADMisfire: Resuming after delay');
+              this.wavPlayer.play();
+              this.userIsSpeaking = true;
+              this.options.onUserIsSpeakingChange(true);
+            } else {
+              console.log('onVADMisfire: Not resuming - either no pause or user speaking again');
+              this.endUserTurn = true;
+            }
+          }, this.options.vadResumeDelay);
         },
         onSpeechEnd: () => {
-          this.endUserTurn = true; // Set flag to indicate that the user turn has ended, so we can send a vad_end event to the server
+          console.log('onSpeechEnd: sending vad_end');
+          this.endUserTurn = true; // Set flag to indicate that the user turn has ended
+          this.audioBuffer = []; // Clear buffer on speech end
+          this.userIsSpeaking = false;
+          this.options.onUserIsSpeakingChange(false);
+          console.log('onSpeechEnd: State after update - endUserTurn:', this.endUserTurn, 'userIsSpeaking:', this.userIsSpeaking);
+
+          // Send vad_end immediately instead of waiting for next audio chunk
+          this._wsSend({
+            type: 'vad_events',
+            event: 'vad_end',
+          } as ClientVadEventsMessage);
+          this.endUserTurn = false; // Reset the flag after sending vad_end
         },
       })
         .then((vad) => {
@@ -270,28 +325,28 @@ class LayercodeClient implements ILayercodeClient {
     } as ClientTriggerResponseAudioReplayFinishedMessage);
   }
 
-  private _estimateWordsHeard(text: string, playbackOffsetSeconds: number): { wordsHeard: number, textHeard: string } {
-    const words = text.split(/\s+/).filter(word => word.length > 0);
+  private _estimateWordsHeard(text: string, playbackOffsetSeconds: number): { wordsHeard: number; textHeard: string } {
+    const words = text.split(/\s+/).filter((word) => word.length > 0);
     const totalWords = words.length;
-    
+
     // Rough estimation: average speaking rate is ~150 words per minute (2.5 words per second)
     const estimatedWordsPerSecond = 2.5;
     const estimatedWordsHeard = Math.min(Math.floor(playbackOffsetSeconds * estimatedWordsPerSecond), totalWords);
-    
+
     const textHeard = words.slice(0, estimatedWordsHeard).join(' ');
-    
+
     return { wordsHeard: estimatedWordsHeard, textHeard };
   }
 
   private async _clientInterruptAssistantReplay(): Promise<void> {
     const offsetData = await this.wavPlayer.interrupt();
-    
+
     if (offsetData && this.currentTurnText && this.currentTurnId) {
       const { wordsHeard, textHeard } = this._estimateWordsHeard(this.currentTurnText, offsetData.currentTime);
-      const totalWords = this.currentTurnText.split(/\s+/).filter(word => word.length > 0).length;
-      
+      const totalWords = this.currentTurnText.split(/\s+/).filter((word) => word.length > 0).length;
+
       console.log(`Interruption detected: ${wordsHeard}/${totalWords} words heard, text: "${textHeard}"`);
-      
+
       // Send interruption event with context
       this._wsSend({
         type: 'trigger.response.audio.interrupted',
@@ -301,7 +356,7 @@ class LayercodeClient implements ILayercodeClient {
           estimated_words_heard: wordsHeard,
           total_words: totalWords,
           text_heard: textHeard,
-        }
+        },
       } as ClientTriggerResponseAudioInterruptedMessage);
     }
   }
@@ -340,8 +395,9 @@ class LayercodeClient implements ILayercodeClient {
           console.log(message);
           if (message.role === 'assistant') {
             // Start tracking new assistant turn
-            this.currentTurnText = '';
-            this.currentTurnId = null; // Will be set when we receive first audio
+            // Note: Don't reset currentTurnId here - let response.audio set it
+            // This prevents race conditions where text arrives before audio
+            console.log('Assistant turn started, will track new turn ID from audio/text');
           } else if (message.role === 'user' && !this.pushToTalkEnabled && this.canInterrupt) {
             // Interrupt any playing assistant audio if this is a turn trigged by the server (and not push to talk, which will have already called interrupt)
             console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
@@ -352,18 +408,30 @@ class LayercodeClient implements ILayercodeClient {
         case 'response.audio':
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
-          
-          // Set current turn ID from first audio message
-          if (!this.currentTurnId) {
+
+          // Set current turn ID from first audio message, or update if different turn
+          if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
+            console.log(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
+            const oldTurnId = this.currentTurnId;
             this.currentTurnId = message.turn_id;
+            this.currentTurnText = ''; // Reset text for new turn
+
+            // Clean up interrupted tracks, keeping only the current turn
+            this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
           }
           break;
 
         case 'response.text':
-          // Accumulate text for interruption tracking
-          if (message.turn_id === this.currentTurnId || !this.currentTurnId) {
+          // Set turn ID from first text message if not set, or accumulate if matches current turn
+          if (!this.currentTurnId || message.turn_id === this.currentTurnId) {
+            if (!this.currentTurnId) {
+              console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
+              this.currentTurnId = message.turn_id;
+              this.currentTurnText = '';
+            }
             this.currentTurnText += message.content;
-            this.currentTurnId = message.turn_id;
+          } else {
+            console.log(`Ignoring text for turn ${message.turn_id}, current turn is ${this.currentTurnId}`);
           }
           break;
 
@@ -397,19 +465,30 @@ class LayercodeClient implements ILayercodeClient {
       const sendAudio = this.pushToTalkEnabled ? this.pushToTalkActive : this.userIsSpeaking;
 
       if (sendAudio) {
+        // If we have buffered audio, send it first
+        if (this.audioBuffer.length > 0) {
+          console.log(`Sending ${this.audioBuffer.length} buffered audio chunks`);
+          for (const bufferedAudio of this.audioBuffer) {
+            this._wsSend({
+              type: 'client.audio',
+              content: bufferedAudio,
+            } as ClientAudioMessage);
+          }
+          this.audioBuffer = []; // Clear the buffer after sending
+        }
+
+        // Send the current audio
         this._wsSend({
           type: 'client.audio',
           content: base64,
         } as ClientAudioMessage);
+      } else {
+        // Buffer audio when not sending (to catch audio just before VAD triggers)
+        this.audioBuffer.push(base64);
 
-        if (this.endUserTurn) {
-          this.endUserTurn = false;
-          this.userIsSpeaking = false; // Reset userIsSpeaking to false so we don't send any more audio to the server
-          this.options.onUserIsSpeakingChange(false);
-          this._wsSend({
-            type: 'vad_events',
-            event: 'vad_end',
-          } as ClientVadEventsMessage);
+        // Keep buffer size reasonable (e.g., last 10 chunks ≈ 200ms at 20ms chunks)
+        if (this.audioBuffer.length > 10) {
+          this.audioBuffer.shift(); // Remove oldest chunk
         }
       }
     } catch (error) {

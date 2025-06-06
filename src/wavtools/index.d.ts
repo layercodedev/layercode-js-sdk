@@ -35,6 +35,7 @@ export class WavStreamPlayer {
   getAmplitude(): number;
   startAmplitudeMonitoring(callback: (amplitude: number) => void): void;
   getTrackSampleOffset(interrupt?: boolean): Promise<{ trackId: string | null; offset: number; currentTime: number } | null>;
+  clearInterruptedTracks(keepTrackIds?: string[]): void;
   isPlaying: boolean;
 }
 
