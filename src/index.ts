@@ -8,6 +8,7 @@ import {
   ClientAudioMessage,
   ClientTriggerTurnMessage,
   ClientTriggerResponseAudioReplayFinishedMessage,
+  ClientTriggerResponseAudioInterruptedMessage,
   ClientVadEventsMessage,
 } from './interfaces.js';
 
@@ -86,6 +87,8 @@ class LayercodeClient implements ILayercodeClient {
   private endUserTurn: boolean;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
+  private currentTurnText: string; // Track accumulated text for current turn
+  private currentTurnId: string | null; // Track current turn ID
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
@@ -135,6 +138,8 @@ class LayercodeClient implements ILayercodeClient {
     this.endUserTurn = false;
     this.recorderStarted = false;
     this.readySent = false;
+    this.currentTurnText = '';
+    this.currentTurnId = null;
 
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
@@ -265,14 +270,40 @@ class LayercodeClient implements ILayercodeClient {
     } as ClientTriggerResponseAudioReplayFinishedMessage);
   }
 
+  private _estimateWordsHeard(text: string, playbackOffsetSeconds: number): { wordsHeard: number, textHeard: string } {
+    const words = text.split(/\s+/).filter(word => word.length > 0);
+    const totalWords = words.length;
+    
+    // Rough estimation: average speaking rate is ~150 words per minute (2.5 words per second)
+    const estimatedWordsPerSecond = 2.5;
+    const estimatedWordsHeard = Math.min(Math.floor(playbackOffsetSeconds * estimatedWordsPerSecond), totalWords);
+    
+    const textHeard = words.slice(0, estimatedWordsHeard).join(' ');
+    
+    return { wordsHeard: estimatedWordsHeard, textHeard };
+  }
+
   private async _clientInterruptAssistantReplay(): Promise<void> {
-    await this.wavPlayer.interrupt();
-    // TODO: Use in voice pipeline to know how much of the audio has been played and how much to truncate transcript
-    // this._wsSend({
-    //   type: 'trigger.response.audio.replay_finished',
-    //   reason: 'interrupted',
-    //   delta_id: 'TODO'
-    // });
+    const offsetData = await this.wavPlayer.interrupt();
+    
+    if (offsetData && this.currentTurnText && this.currentTurnId) {
+      const { wordsHeard, textHeard } = this._estimateWordsHeard(this.currentTurnText, offsetData.currentTime);
+      const totalWords = this.currentTurnText.split(/\s+/).filter(word => word.length > 0).length;
+      
+      console.log(`Interruption detected: ${wordsHeard}/${totalWords} words heard, text: "${textHeard}"`);
+      
+      // Send interruption event with context
+      this._wsSend({
+        type: 'trigger.response.audio.interrupted',
+        playback_offset: offsetData.currentTime,
+        interruption_context: {
+          turn_id: this.currentTurnId,
+          estimated_words_heard: wordsHeard,
+          total_words: totalWords,
+          text_heard: textHeard,
+        }
+      } as ClientTriggerResponseAudioInterruptedMessage);
+    }
   }
 
   async triggerUserTurnStarted(): Promise<void> {
@@ -307,21 +338,33 @@ class LayercodeClient implements ILayercodeClient {
           // Sent from the server to this client when a new user turn is detected
           console.log('received turn.start from server');
           console.log(message);
-          if (message.role === 'user' && !this.pushToTalkEnabled && this.canInterrupt) {
+          if (message.role === 'assistant') {
+            // Start tracking new assistant turn
+            this.currentTurnText = '';
+            this.currentTurnId = null; // Will be set when we receive first audio
+          } else if (message.role === 'user' && !this.pushToTalkEnabled && this.canInterrupt) {
             // Interrupt any playing assistant audio if this is a turn trigged by the server (and not push to talk, which will have already called interrupt)
             console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
             await this._clientInterruptAssistantReplay();
           }
-          // if (message.role === 'assistant') {
-          //   // Clear the buffer of audio when the assisatnt starts a new turn, as it may have been paused previously by VAD, leaving some audio frames in the buffer.
-          //   console.log('Clearing audio buffer as assistant turn has started');
-          //   await this._clientInterruptAssistantReplay();
-          // }
           break;
 
         case 'response.audio':
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
+          
+          // Set current turn ID from first audio message
+          if (!this.currentTurnId) {
+            this.currentTurnId = message.turn_id;
+          }
+          break;
+
+        case 'response.text':
+          // Accumulate text for interruption tracking
+          if (message.turn_id === this.currentTurnId || !this.currentTurnId) {
+            this.currentTurnText += message.content;
+            this.currentTurnId = message.turn_id;
+          }
           break;
 
         // case 'response.end':
