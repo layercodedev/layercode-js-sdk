@@ -86,7 +86,6 @@ class LayercodeClient implements ILayercodeClient {
   private endUserTurn: boolean;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
-  private currentTurnText: string; // Track accumulated text for current turn
   private currentTurnId: string | null; // Track current turn ID
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
   _websocketUrl: string;
@@ -137,7 +136,6 @@ class LayercodeClient implements ILayercodeClient {
     this.endUserTurn = false;
     this.recorderStarted = false;
     this.readySent = false;
-    this.currentTurnText = '';
     this.currentTurnId = null;
     this.audioBuffer = [];
 
@@ -325,39 +323,28 @@ class LayercodeClient implements ILayercodeClient {
     } as ClientTriggerResponseAudioReplayFinishedMessage);
   }
 
-  private _estimateWordsHeard(text: string, playbackOffsetSeconds: number): { wordsHeard: number; textHeard: string } {
-    const words = text.split(/\s+/).filter((word) => word.length > 0);
-    const totalWords = words.length;
-
-    // Rough estimation: average speaking rate is ~150 words per minute (2.5 words per second)
-    const estimatedWordsPerSecond = 2.5;
-    const estimatedWordsHeard = Math.min(Math.floor(playbackOffsetSeconds * estimatedWordsPerSecond), totalWords);
-
-    const textHeard = words.slice(0, estimatedWordsHeard).join(' ');
-
-    return { wordsHeard: estimatedWordsHeard, textHeard };
-  }
 
   private async _clientInterruptAssistantReplay(): Promise<void> {
     const offsetData = await this.wavPlayer.interrupt();
 
-    if (offsetData && this.currentTurnText && this.currentTurnId) {
-      const { wordsHeard, textHeard } = this._estimateWordsHeard(this.currentTurnText, offsetData.currentTime);
-      const totalWords = this.currentTurnText.split(/\s+/).filter((word) => word.length > 0).length;
+    if (offsetData && this.currentTurnId) {
+      const offsetMs = Math.round(offsetData.currentTime * 1000);
+      console.log(`Interruption detected: ${offsetMs}ms offset for turn ${this.currentTurnId}`);
 
-      console.log(`Interruption detected: ${wordsHeard}/${totalWords} words heard, text: "${textHeard}"`);
-
-      // Send interruption event with context
+      // Send interruption event with just the playback offset and turn ID
       this._wsSend({
         type: 'trigger.response.audio.interrupted',
         playback_offset: offsetData.currentTime,
         interruption_context: {
           turn_id: this.currentTurnId,
-          estimated_words_heard: wordsHeard,
-          total_words: totalWords,
-          text_heard: textHeard,
+          playback_offset_milliseconds: offsetMs,
         },
       } as ClientTriggerResponseAudioInterruptedMessage);
+    } else {
+      console.warn('Interruption requested but missing required data:', { 
+        hasOffsetData: !!offsetData, 
+        hasTurnId: !!this.currentTurnId
+      });
     }
   }
 
@@ -412,38 +399,26 @@ class LayercodeClient implements ILayercodeClient {
           // Set current turn ID from first audio message, or update if different turn
           if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
             console.log(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
-            const oldTurnId = this.currentTurnId;
             this.currentTurnId = message.turn_id;
-            this.currentTurnText = ''; // Reset text for new turn
 
             // Clean up interrupted tracks, keeping only the current turn
             this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
           }
           break;
 
-        case 'response.text':
-          // Set turn ID from first text message if not set, or accumulate if matches current turn
-          if (!this.currentTurnId || message.turn_id === this.currentTurnId) {
-            if (!this.currentTurnId) {
-              console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
-              this.currentTurnId = message.turn_id;
-              this.currentTurnText = '';
-            }
-            this.currentTurnText += message.content;
-          } else {
-            console.log(`Ignoring text for turn ${message.turn_id}, current turn is ${this.currentTurnId}`);
+        case 'response.text': {
+          // Set turn ID from first text message if not set
+          if (!this.currentTurnId) {
+            this.currentTurnId = message.turn_id;
+            console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
           }
+          // Note: We no longer track text content in the client - the pipeline handles interruption estimation
           break;
-
-        // case 'response.end':
-        //   console.log('received response.end');
-        //   break;
-
+        }
         case 'response.data':
           console.log('received response.data', message);
           this.options.onDataMessage(message);
           break;
-
         default:
           console.error('Unknown message type received:', message);
           break;
@@ -549,6 +524,9 @@ class LayercodeClient implements ILayercodeClient {
     try {
       this._setStatus('connecting');
 
+      // Reset turn tracking for clean start
+      this._resetTurnTracking();
+
       // Get session key from server
       let authorizeSessionRequestBody = {
         pipeline_id: this.options.pipelineId,
@@ -632,6 +610,11 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
+  private _resetTurnTracking(): void {
+    this.currentTurnId = null;
+    console.log('Reset turn tracking state');
+  }
+
   async disconnect(): Promise<void> {
     // Clean up VAD if it exists
     if (this.vad) {
@@ -639,10 +622,13 @@ class LayercodeClient implements ILayercodeClient {
       this.vad.destroy();
       this.vad = null;
     }
-    
+
     this.wavRecorder.quit();
     this.wavPlayer.disconnect();
-    
+
+    // Reset turn tracking
+    this._resetTurnTracking();
+
     // Close websocket and ensure status is updated
     if (this.ws) {
       this.ws.close();

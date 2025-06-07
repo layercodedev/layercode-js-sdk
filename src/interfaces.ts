@@ -57,9 +57,7 @@ export interface ClientTriggerResponseAudioInterruptedMessage extends BaseLayerc
   playback_offset?: number;
   interruption_context?: {
     turn_id: string;
-    estimated_words_heard: number;
-    total_words: number;
-    text_heard: string;
+    playback_offset_milliseconds: number;
   };
 }
 
