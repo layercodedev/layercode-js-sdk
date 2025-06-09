@@ -39,7 +39,7 @@ export interface ClientTriggerTurnMessage extends BaseLayercodeMessage {
 
 export interface ClientVadEventsMessage extends BaseLayercodeMessage {
   type: 'vad_events';
-  event: 'vad_start' | 'vad_end';
+  event: 'vad_start' | 'vad_end' | 'vad_model_failed';
 }
 
 export interface ClientReadyMessage extends BaseLayercodeMessage {
@@ -57,7 +57,7 @@ export interface ClientTriggerResponseAudioInterruptedMessage extends BaseLayerc
   playback_offset?: number;
   interruption_context?: {
     turn_id: string;
-    playback_offset_milliseconds: number;
+    playback_offset_ms: number;
   };
 }
 
@@ -110,7 +110,13 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
 
 export type ServerMessage = ServerTurnMessage | ServerResponseAudioMessage | ServerResponseTextMessage | ServerResponseDataMessage;
 
-export type ClientMessage = ClientAudioMessage | ClientTriggerTurnMessage | ClientTriggerResponseAudioReplayFinishedMessage | ClientTriggerResponseAudioInterruptedMessage | ClientVadEventsMessage | ClientReadyMessage;
+export type ClientMessage =
+  | ClientAudioMessage
+  | ClientTriggerTurnMessage
+  | ClientTriggerResponseAudioReplayFinishedMessage
+  | ClientTriggerResponseAudioInterruptedMessage
+  | ClientVadEventsMessage
+  | ClientReadyMessage;
 
 // Union type for all possible messages
 export type LayercodeMessage = ClientMessage | ServerMessage;
