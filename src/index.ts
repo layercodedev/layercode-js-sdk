@@ -1,5 +1,6 @@
 /* eslint-env browser */
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
+// @ts-ignore - VAD package does not provide TypeScript types
 import { MicVAD } from '@ricky0123/vad-web';
 import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
 import {
@@ -18,7 +19,22 @@ interface PipelineConfig {
     can_interrupt: boolean;
     automatic: boolean;
   };
+  vad?: {
+    enabled?: boolean;
+    gate_audio?: boolean;
+    buffer_frames?: number;
+    model?: string;
+    positive_speech_threshold?: number;
+    negative_speech_threshold?: number;
+    redemption_frames?: number;
+    min_speech_frames?: number;
+    pre_speech_pad_frames?: number;
+    frame_samples?: number;
+  };
 }
+
+// SDK version - updated when publishing
+const SDK_VERSION = '1.0.26';
 
 /**
  * Interface for LayercodeClient public methods
@@ -87,6 +103,7 @@ class LayercodeClient implements ILayercodeClient {
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
+  private vadConfig: PipelineConfig['vad'] | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -137,6 +154,7 @@ class LayercodeClient implements ILayercodeClient {
     this.readySent = false;
     this.currentTurnId = null;
     this.audioBuffer = [];
+    this.vadConfig = null;
     // this.audioPauseTime = null;
 
     // Bind event handlers
@@ -144,72 +162,23 @@ class LayercodeClient implements ILayercodeClient {
     this._handleDataAvailable = this._handleDataAvailable.bind(this);
   }
 
-  private _setupAmplitudeBasedVAD(): void {
-    let isSpeakingByAmplitude = false;
-    let silenceFrames = 0;
-    const AMPLITUDE_THRESHOLD = 0.01; // Adjust based on testing
-    const SILENCE_FRAMES_THRESHOLD = 6.4; // 6.4 * 20ms chunks = 128ms silence. Same as Silero ((frame samples: 512 / sampleRate: 16000) * 1000 * redemptionFrames: 4) = 128 ms silence
-
-    // Monitor amplitude changes
-    this.wavRecorder.startAmplitudeMonitoring((amplitude: number) => {
-      const wasSpeaking = isSpeakingByAmplitude;
-
-      if (amplitude > AMPLITUDE_THRESHOLD) {
-        silenceFrames = 0;
-        if (!wasSpeaking) {
-          isSpeakingByAmplitude = true;
-          this.userIsSpeaking = true;
-          this.options.onUserIsSpeakingChange(true);
-          this._wsSend({
-            type: 'vad_events',
-            event: 'vad_start',
-          } as ClientVadEventsMessage);
-        }
-      } else {
-        silenceFrames++;
-        if (wasSpeaking && silenceFrames >= SILENCE_FRAMES_THRESHOLD) {
-          isSpeakingByAmplitude = false;
-          this.userIsSpeaking = false;
-          this.options.onUserIsSpeakingChange(false);
-          this._wsSend({
-            type: 'vad_events',
-            event: 'vad_end',
-          } as ClientVadEventsMessage);
-        }
-      }
-    });
-  }
-
   private _initializeVAD(): void {
-    console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt });
+    console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode, we don't need to use the VAD model
     if (this.pushToTalkEnabled) {
       return;
     }
 
-    const vadLoadTimeout = setTimeout(() => {
-      console.log('silero vad model timeout');
-      console.warn('VAD model failed to load - falling back to amplitude-based detection');
+    // Check if VAD is disabled
+    if (this.vadConfig?.enabled === false) {
+      console.log('VAD is disabled by backend configuration');
+      return;
+    }
 
-      // Send a message to server indicating VAD failure
-      this._wsSend({
-        type: 'vad_events',
-        event: 'vad_model_failed',
-      } as ClientVadEventsMessage);
-
-      // Set up amplitude-based fallback detection
-      this._setupAmplitudeBasedVAD();
-    }, 2000);
-    MicVAD.new({
+    // Build VAD configuration object, only including keys that are defined
+    const vadOptions: any = {
       stream: this.wavRecorder.getStream() || undefined,
-      model: 'v5',
-      positiveSpeechThreshold: 0.15,
-      negativeSpeechThreshold: 0.05,
-      redemptionFrames: 4,
-      minSpeechFrames: 2,
-      preSpeechPadFrames: 0,
-      frameSamples: 512, // Required for v5 as per https://docs.vad.ricky0123.com/user-guide/algorithm/#configuration
       onSpeechStart: () => {
         console.log('onSpeechStart: sending vad_start');
         this.userIsSpeaking = true;
@@ -229,18 +198,44 @@ class LayercodeClient implements ILayercodeClient {
           event: 'vad_end',
         } as ClientVadEventsMessage);
       },
-      // onVADMisfire: () => {
-      //   // If the speech detected was for less than minSpeechFrames, this is called instead of onSpeechEnd.
-      // },
-    })
-      .then((vad) => {
-        clearTimeout(vadLoadTimeout);
+    };
+
+    // Apply VAD configuration from backend if available
+    if (this.vadConfig) {
+      // Only add keys that are explicitly defined (not undefined)
+      if (this.vadConfig.model !== undefined) vadOptions.model = this.vadConfig.model;
+      if (this.vadConfig.positive_speech_threshold !== undefined) vadOptions.positiveSpeechThreshold = this.vadConfig.positive_speech_threshold;
+      if (this.vadConfig.negative_speech_threshold !== undefined) vadOptions.negativeSpeechThreshold = this.vadConfig.negative_speech_threshold;
+      if (this.vadConfig.redemption_frames !== undefined) vadOptions.redemptionFrames = this.vadConfig.redemption_frames;
+      if (this.vadConfig.min_speech_frames !== undefined) vadOptions.minSpeechFrames = this.vadConfig.min_speech_frames;
+      if (this.vadConfig.pre_speech_pad_frames !== undefined) vadOptions.preSpeechPadFrames = this.vadConfig.pre_speech_pad_frames;
+      if (this.vadConfig.frame_samples !== undefined) vadOptions.frameSamples = this.vadConfig.frame_samples;
+    } else {
+      // Default values if no config from backend
+      vadOptions.model = 'v5';
+      vadOptions.positiveSpeechThreshold = 0.15;
+      vadOptions.negativeSpeechThreshold = 0.05;
+      vadOptions.redemptionFrames = 4;
+      vadOptions.minSpeechFrames = 2;
+      vadOptions.preSpeechPadFrames = 0;
+      vadOptions.frameSamples = 512; // Required for v5
+    }
+
+    console.log('Creating VAD with options:', vadOptions);
+
+    MicVAD.new(vadOptions)
+      .then((vad: MicVAD) => {
         this.vad = vad;
         this.vad.start();
-        console.log('VAD started');
+        console.log('VAD started successfully');
       })
-      .catch((error) => {
+      .catch((error: any) => {
         console.error('Error initializing VAD:', error);
+        // Send a message to server indicating VAD failure
+        this._wsSend({
+          type: 'vad_events',
+          event: 'vad_model_failed',
+        } as ClientVadEventsMessage);
       });
   }
 
@@ -371,11 +366,24 @@ class LayercodeClient implements ILayercodeClient {
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
       const base64 = arrayBufferToBase64(data.mono);
-      const sendAudio = this.pushToTalkEnabled ? this.pushToTalkActive : this.userIsSpeaking;
+
+      // Determine if we should gate audio based on VAD configuration
+      const shouldGateAudio = this.vadConfig?.gate_audio !== false; // Default to true if not specified
+      const bufferFrames = this.vadConfig?.buffer_frames ?? 10; // Default to 10 if not specified
+
+      let sendAudio: boolean;
+      if (this.pushToTalkEnabled) {
+        sendAudio = this.pushToTalkActive;
+      } else if (shouldGateAudio) {
+        sendAudio = this.userIsSpeaking;
+      } else {
+        // If gate_audio is false, always send audio
+        sendAudio = true;
+      }
 
       if (sendAudio) {
-        // If we have buffered audio, send it first
-        if (this.audioBuffer.length > 0) {
+        // If we have buffered audio and we're gating, send it first
+        if (shouldGateAudio && this.audioBuffer.length > 0) {
           console.log(`Sending ${this.audioBuffer.length} buffered audio chunks`);
           for (const bufferedAudio of this.audioBuffer) {
             this._wsSend({
@@ -395,8 +403,8 @@ class LayercodeClient implements ILayercodeClient {
         // Buffer audio when not sending (to catch audio just before VAD triggers)
         this.audioBuffer.push(base64);
 
-        // Keep buffer size reasonable (e.g., last 10 chunks ≈ 200ms at 20ms chunks)
-        if (this.audioBuffer.length > 10) {
+        // Keep buffer size based on configuration
+        if (this.audioBuffer.length > bufferFrames) {
           this.audioBuffer.shift(); // Remove oldest chunk
         }
       }
@@ -464,7 +472,8 @@ class LayercodeClient implements ILayercodeClient {
       let authorizeSessionRequestBody = {
         pipeline_id: this.options.pipelineId,
         metadata: this.options.metadata,
-      } as { pipeline_id: string; metadata: Record<string, any>; session_id?: string };
+        sdk_version: SDK_VERSION,
+      } as { pipeline_id: string; metadata: Record<string, any>; sdk_version: string; session_id?: string };
       // If we're reconnecting to a previous session, we need to include the session_id in the request. Otherwise we don't send session_id, and a new session will be created and the session_id will be returned in the response.
       if (this.options.sessionId) {
         authorizeSessionRequestBody.session_id = this.options.sessionId;
@@ -490,6 +499,10 @@ class LayercodeClient implements ILayercodeClient {
       );
       const config: PipelineConfig = authorizeSessionResponseBody.config;
       console.log('config', config);
+
+      // Store VAD configuration
+      this.vadConfig = config.vad || null;
+
       if (config.transcription.trigger === 'push_to_talk') {
         this.pushToTalkEnabled = true;
       } else if (config.transcription.trigger === 'automatic') {
