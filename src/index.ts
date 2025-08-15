@@ -350,7 +350,13 @@ class LayercodeClient implements ILayercodeClient {
           this.options.onDataMessage(message);
           break;
         default:
-          console.error('Unknown message type received:', message);
+          if (!message.type) {
+            // Empty or malformed message without a type - could be logged as debug
+            console.debug('Received message without type:', message);
+          } else {
+            // Valid message with unrecognized type - not an error, just unhandled
+            console.debug(`Received unhandled message type '${message.type}'`, message);
+          }
           break;
       }
     } catch (error) {
