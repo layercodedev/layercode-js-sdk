@@ -21,7 +21,6 @@
     "*.d.ts",
     "src/wavtools/**/*.js",
     "src/wavtools/**/*.d.tssrc/utils.jsutils.js",
-    "src/utils.d.ts",
     "src/index.ts"
   ],
   "exclude": ["node_modules", "dist"]

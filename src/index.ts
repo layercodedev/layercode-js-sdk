@@ -1,17 +1,8 @@
 /* eslint-env browser */
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
-// @ts-ignore - VAD package does not provide TypeScript types
-import { MicVAD } from '@ricky0123/vad-web';
-import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
-import {
-  ClientMessage,
-  ServerMessage,
-  ClientAudioMessage,
-  ClientTriggerTurnMessage,
-  ClientTriggerResponseAudioReplayFinishedMessage,
-  ClientTriggerResponseAudioInterruptedMessage,
-  ClientVadEventsMessage,
-} from './interfaces.js';
+import { arrayBufferToBase64 } from './utils';
+import { VADManager, VADConfig } from './vad-manager';
+import { WebSocketManager } from './websocket';
 
 interface PipelineConfig {
   transcription: {
@@ -19,22 +10,11 @@ interface PipelineConfig {
     can_interrupt: boolean;
     automatic: boolean;
   };
-  vad?: {
-    enabled?: boolean;
-    gate_audio?: boolean;
-    buffer_frames?: number;
-    model?: string;
-    positive_speech_threshold?: number;
-    negative_speech_threshold?: number;
-    redemption_frames?: number;
-    min_speech_frames?: number;
-    pre_speech_pad_frames?: number;
-    frame_samples?: number;
-  };
+  vad?: VADConfig;
 }
 
 // SDK version - updated when publishing
-const SDK_VERSION = '1.0.26';
+const SDK_VERSION = '1.0.27';
 
 /**
  * Interface for LayercodeClient public methods
@@ -46,6 +26,12 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
+  getDefaultDeviceId(): Promise<string | null>;
+  getAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>>;
+  getCurrentDeviceId(): string | null;
+  refreshAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>>;
+  logDeviceStatus(): Promise<void>;
+  forceVADReinitialization(): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
@@ -92,8 +78,8 @@ class LayercodeClient implements ILayercodeClient {
   private options: Required<LayercodeClientOptions>;
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
-  private vad: MicVAD | null;
-  private ws: WebSocket | null;
+  private vadManager: VADManager;
+  private websocketManager: WebSocketManager;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
   private pushToTalkEnabled: boolean;
@@ -140,8 +126,39 @@ class LayercodeClient implements ILayercodeClient {
       finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
       sampleRate: 16000, // TODO should be set my fetched pipeline config
     });
-    this.vad = null;
-    this.ws = null;
+
+    // Initialize WebSocket manager
+    this.websocketManager = new WebSocketManager({
+      onConnect: this.options.onConnect,
+      onDisconnect: this.options.onDisconnect,
+      onError: this.options.onError,
+      onDataMessage: this.options.onDataMessage,
+      onTurnStart: this._handleTurnStart.bind(this),
+      onResponseAudio: this._handleResponseAudio.bind(this),
+      onResponseText: this._handleResponseText.bind(this),
+      onStatusChange: this._setStatus.bind(this),
+    });
+
+    // Initialize VAD manager
+    this.vadManager = new VADManager({
+      onSpeechStart: () => {
+        this.userIsSpeaking = true;
+        this.options.onUserIsSpeakingChange(true);
+        this.websocketManager.sendVADEvent('vad_start');
+      },
+      onSpeechEnd: () => {
+        this.userIsSpeaking = false;
+        this.options.onUserIsSpeakingChange(false);
+        this.audioBuffer = []; // Clear buffer on speech end
+        this.websocketManager.sendVADEvent('vad_end');
+      },
+      onVADFailure: (error: any) => {
+        this.websocketManager.sendVADEvent('vad_model_failed');
+      },
+      onStatusChange: (status: string) => {
+        // VAD status changes can be handled here if needed
+      },
+    });
     this.status = 'disconnected';
     this.userAudioAmplitude = 0;
     this.agentAudioAmplitude = 0;
@@ -158,85 +175,12 @@ class LayercodeClient implements ILayercodeClient {
     // this.audioPauseTime = null;
 
     // Bind event handlers
-    this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
     this._handleDataAvailable = this._handleDataAvailable.bind(this);
   }
 
   private _initializeVAD(): void {
-    console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
-
-    // If we're in push to talk mode, we don't need to use the VAD model
-    if (this.pushToTalkEnabled) {
-      return;
-    }
-
-    // Check if VAD is disabled
-    if (this.vadConfig?.enabled === false) {
-      console.log('VAD is disabled by backend configuration');
-      return;
-    }
-
-    // Build VAD configuration object, only including keys that are defined
-    const vadOptions: any = {
-      stream: this.wavRecorder.getStream() || undefined,
-      onSpeechStart: () => {
-        console.log('onSpeechStart: sending vad_start');
-        this.userIsSpeaking = true;
-        this.options.onUserIsSpeakingChange(true);
-        this._wsSend({
-          type: 'vad_events',
-          event: 'vad_start',
-        } as ClientVadEventsMessage);
-      },
-      onSpeechEnd: () => {
-        console.log('onSpeechEnd: sending vad_end');
-        this.userIsSpeaking = false;
-        this.options.onUserIsSpeakingChange(false);
-        this.audioBuffer = []; // Clear buffer on speech end
-        this._wsSend({
-          type: 'vad_events',
-          event: 'vad_end',
-        } as ClientVadEventsMessage);
-      },
-    };
-
-    // Apply VAD configuration from backend if available
-    if (this.vadConfig) {
-      // Only add keys that are explicitly defined (not undefined)
-      if (this.vadConfig.model !== undefined) vadOptions.model = this.vadConfig.model;
-      if (this.vadConfig.positive_speech_threshold !== undefined) vadOptions.positiveSpeechThreshold = this.vadConfig.positive_speech_threshold;
-      if (this.vadConfig.negative_speech_threshold !== undefined) vadOptions.negativeSpeechThreshold = this.vadConfig.negative_speech_threshold;
-      if (this.vadConfig.redemption_frames !== undefined) vadOptions.redemptionFrames = this.vadConfig.redemption_frames;
-      if (this.vadConfig.min_speech_frames !== undefined) vadOptions.minSpeechFrames = this.vadConfig.min_speech_frames;
-      if (this.vadConfig.pre_speech_pad_frames !== undefined) vadOptions.preSpeechPadFrames = this.vadConfig.pre_speech_pad_frames;
-      if (this.vadConfig.frame_samples !== undefined) vadOptions.frameSamples = this.vadConfig.frame_samples;
-    } else {
-      // Default values if no config from backend
-      vadOptions.model = 'v5';
-      vadOptions.positiveSpeechThreshold = 0.15;
-      vadOptions.negativeSpeechThreshold = 0.05;
-      vadOptions.redemptionFrames = 4;
-      vadOptions.minSpeechFrames = 2;
-      vadOptions.preSpeechPadFrames = 0;
-      vadOptions.frameSamples = 512; // Required for v5
-    }
-
-    console.log('Creating VAD with options:', vadOptions);
-
-    MicVAD.new(vadOptions)
-      .then((vad: MicVAD) => {
-        this.vad = vad;
-        this.vad.start();
-        console.log('VAD started successfully');
-      })
-      .catch((error: any) => {
-        console.error('Error initializing VAD:', error);
-        // Send a message to server indicating VAD failure
-        this._wsSend({
-          type: 'vad_events',
-          event: 'vad_model_failed',
-        } as ClientVadEventsMessage);
-      });
+    const currentStream = this.wavRecorder.getStream();
+    this.vadManager.initialize(this.vadConfig || null, currentStream, this.pushToTalkEnabled);
   }
 
   /**
@@ -253,10 +197,7 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _clientResponseAudioReplayFinished(): void {
     console.log('clientResponseAudioReplayFinished');
-    this._wsSend({
-      type: 'trigger.response.audio.replay_finished',
-      reason: 'completed',
-    } as ClientTriggerResponseAudioReplayFinishedMessage);
+    this.websocketManager.sendAudioReplayFinished(this.currentTurnId || '');
   }
 
   private async _clientInterruptAssistantReplay(): Promise<void> {
@@ -266,14 +207,7 @@ class LayercodeClient implements ILayercodeClient {
       let offsetMs = offsetData.currentTime * 1000;
 
       // Send interruption event with accurate playback offset in milliseconds
-      this._wsSend({
-        type: 'trigger.response.audio.interrupted',
-        playback_offset: offsetMs,
-        interruption_context: {
-          turn_id: this.currentTurnId,
-          playback_offset_ms: offsetMs,
-        },
-      } as ClientTriggerResponseAudioInterruptedMessage);
+      this.websocketManager.sendAudioInterrupted(this.currentTurnId);
     } else {
       console.warn('Interruption requested but missing required data:', {
         hasOffsetData: !!offsetData,
@@ -285,7 +219,7 @@ class LayercodeClient implements ILayercodeClient {
   async triggerUserTurnStarted(): Promise<void> {
     if (!this.pushToTalkActive) {
       this.pushToTalkActive = true;
-      this._wsSend({ type: 'trigger.turn.start', role: 'user' } as ClientTriggerTurnMessage);
+      this.websocketManager.sendTurnStart('user');
       await this._clientInterruptAssistantReplay();
     }
   }
@@ -293,69 +227,7 @@ class LayercodeClient implements ILayercodeClient {
   async triggerUserTurnFinished(): Promise<void> {
     if (this.pushToTalkActive) {
       this.pushToTalkActive = false;
-      this._wsSend({ type: 'trigger.turn.end', role: 'user' } as ClientTriggerTurnMessage);
-    }
-  }
-
-  /**
-   * Handles incoming WebSocket messages
-   * @param {MessageEvent} event - The WebSocket message event
-   */
-  private async _handleWebSocketMessage(event: MessageEvent): Promise<void> {
-    try {
-      const message: ServerMessage = JSON.parse(event.data);
-      if (message.type !== 'response.audio') {
-        console.log('received ws msg:', message);
-      }
-
-      switch (message.type) {
-        case 'turn.start':
-          // Sent from the server to this client when a new user turn is detected
-          console.log('received turn.start from server');
-          console.log(message);
-          if (message.role === 'assistant') {
-            // Start tracking new assistant turn
-            console.log('Assistant turn started, will track new turn ID from audio/text');
-          } else if (message.role === 'user' && !this.pushToTalkEnabled) {
-            // Interrupt any playing assistant audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
-            console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
-            await this._clientInterruptAssistantReplay();
-          }
-          break;
-
-        case 'response.audio':
-          const audioBuffer = base64ToArrayBuffer(message.content);
-          this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
-
-          // Set current turn ID from first audio message, or update if different turn
-          if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
-            console.log(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
-            this.currentTurnId = message.turn_id;
-
-            // Clean up interrupted tracks, keeping only the current turn
-            this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
-          }
-          break;
-
-        case 'response.text': {
-          // Set turn ID from first text message if not set
-          if (!this.currentTurnId) {
-            this.currentTurnId = message.turn_id;
-            console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
-          }
-          break;
-        }
-        case 'response.data':
-          console.log('received response.data', message);
-          this.options.onDataMessage(message);
-          break;
-        default:
-          console.error('Unknown message type received:', message);
-          break;
-      }
-    } catch (error) {
-      console.error('Error processing WebSocket message:', error);
-      this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      this.websocketManager.sendTurnEnd('user');
     }
   }
 
@@ -386,19 +258,13 @@ class LayercodeClient implements ILayercodeClient {
         if (shouldGateAudio && this.audioBuffer.length > 0) {
           console.log(`Sending ${this.audioBuffer.length} buffered audio chunks`);
           for (const bufferedAudio of this.audioBuffer) {
-            this._wsSend({
-              type: 'client.audio',
-              content: bufferedAudio,
-            } as ClientAudioMessage);
+            this.websocketManager.sendAudio(bufferedAudio);
           }
           this.audioBuffer = []; // Clear the buffer after sending
         }
 
         // Send the current audio
-        this._wsSend({
-          type: 'client.audio',
-          content: base64,
-        } as ClientAudioMessage);
+        this.websocketManager.sendAudio(base64);
       } else {
         // Buffer audio when not sending (to catch audio just before VAD triggers)
         this.audioBuffer.push(base64);
@@ -414,21 +280,9 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  private _wsSend(message: ClientMessage): void {
-    if (message.type !== 'client.audio') {
-      console.log('sent ws msg:', message);
-    }
-    const messageString = JSON.stringify(message);
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(messageString);
-    } else {
-      // console.error('WebSocket is not open. Did not send message:', messageString);
-    }
-  }
-
   private _sendReadyIfNeeded(): void {
-    if (this.recorderStarted && this.ws?.readyState === WebSocket.OPEN && !this.readySent) {
-      this._wsSend({ type: 'client.ready' } as ClientMessage);
+    if (this.recorderStarted && this.websocketManager.isConnected() && !this.readySent) {
+      this.websocketManager.sendClientReady();
       this.readySent = true;
     }
   }
@@ -491,12 +345,6 @@ class LayercodeClient implements ILayercodeClient {
       const authorizeSessionResponseBody = await authorizeSessionResponse.json();
       this.sessionId = authorizeSessionResponseBody.session_id; // Save the session_id for use in future reconnects
 
-      // Connect WebSocket
-      this.ws = new WebSocket(
-        `${this._websocketUrl}?${new URLSearchParams({
-          client_session_key: authorizeSessionResponseBody.client_session_key,
-        })}`
-      );
       const config: PipelineConfig = authorizeSessionResponseBody.config;
       console.log('config', config);
 
@@ -511,32 +359,40 @@ class LayercodeClient implements ILayercodeClient {
       } else {
         throw new Error(`Unknown trigger: ${config.transcription.trigger}`);
       }
-      this._initializeVAD();
 
-      // Bind the websocket message callbacks
-      this.ws.onmessage = this._handleWebSocketMessage;
-      this.ws.onopen = () => {
-        console.log('WebSocket connection established');
-        this._setStatus('connected');
-        this.options.onConnect({ sessionId: this.sessionId });
+      // Set session ID in WebSocket manager before connecting
+      this.websocketManager.setSessionId(authorizeSessionResponseBody.session_id);
 
-        // Attempt to send ready message if recorder already started
-        this._sendReadyIfNeeded();
-      };
-      this.ws.onclose = () => {
-        console.log('WebSocket connection closed');
-        this._setStatus('disconnected');
-        this.options.onDisconnect();
-      };
-      this.ws.onerror = (error: Event) => {
-        console.error('WebSocket error:', error);
-        this._setStatus('error');
-        this.options.onError(new Error('WebSocket connection error'));
-      };
+      // Connect WebSocket using the manager
+      await this.websocketManager.connect({
+        url: this._websocketUrl,
+        clientSessionKey: authorizeSessionResponseBody.client_session_key,
+      });
 
       // Initialize microphone audio capture
       await this.wavRecorder.begin();
+
+      // Log the initial device selection for debugging
+      const initialStream = this.wavRecorder.getStream();
+      if (initialStream) {
+        const tracks = initialStream.getAudioTracks();
+        if (tracks.length > 0) {
+          const track = tracks[0];
+          const settings = track.getSettings();
+          console.log('Initial microphone device selected:', {
+            deviceId: settings.deviceId,
+            label: track.label,
+            enabled: track.enabled,
+            muted: track.muted,
+          });
+        }
+      }
+
       await this.wavRecorder.record(this._handleDataAvailable, 1638);
+
+      // Initialize VAD now that we have an audio stream
+      this._initializeVAD();
+
       // Set up microphone amplitude monitoring
       this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
 
@@ -556,6 +412,49 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
+  /**
+   * Handles turn start messages from WebSocket
+   */
+  private _handleTurnStart(message: any): void {
+    console.log('received turn.start from server');
+    console.log(message);
+    if (message.role === 'assistant') {
+      // Start tracking new assistant turn
+      console.log('Assistant turn started, will track new turn ID from audio/text');
+    } else if (message.role === 'user' && !this.pushToTalkEnabled) {
+      // Interrupt any playing assistant audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
+      console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
+      this._clientInterruptAssistantReplay();
+    }
+  }
+
+  /**
+   * Handles response audio messages from WebSocket
+   */
+  private _handleResponseAudio(audioBuffer: ArrayBuffer, turnId: string): void {
+    this.wavPlayer.add16BitPCM(audioBuffer, turnId);
+
+    // Set current turn ID from first audio message, or update if different turn
+    if (!this.currentTurnId || this.currentTurnId !== turnId) {
+      console.log(`Setting current turn ID to: ${turnId} (was: ${this.currentTurnId})`);
+      this.currentTurnId = turnId;
+
+      // Clean up interrupted tracks, keeping only the current turn
+      this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
+    }
+  }
+
+  /**
+   * Handles response text messages from WebSocket
+   */
+  private _handleResponseText(message: any): void {
+    // Set turn ID from first text message if not set
+    if (!this.currentTurnId) {
+      this.currentTurnId = message.turn_id;
+      console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
+    }
+  }
+
   private _resetTurnTracking(): void {
     this.currentTurnId = null;
     console.log('Reset turn tracking state');
@@ -563,11 +462,7 @@ class LayercodeClient implements ILayercodeClient {
 
   async disconnect(): Promise<void> {
     // Clean up VAD if it exists
-    if (this.vad) {
-      this.vad.pause();
-      this.vad.destroy();
-      this.vad = null;
-    }
+    this.vadManager.destroy();
 
     this.wavRecorder.quit();
     this.wavPlayer.disconnect();
@@ -576,11 +471,7 @@ class LayercodeClient implements ILayercodeClient {
     this._resetTurnTracking();
 
     // Close websocket and ensure status is updated
-    if (this.ws) {
-      this.ws.close();
-      this._setStatus('disconnected');
-      this.options.onDisconnect();
-    }
+    this.websocketManager.disconnect();
   }
 
   /**
@@ -596,17 +487,157 @@ class LayercodeClient implements ILayercodeClient {
    * @param {string} deviceId - The deviceId of the new microphone
    */
   async setInputDevice(deviceId: string): Promise<void> {
-    if (this.wavRecorder) {
-      try {
-        await this.wavRecorder.end();
-      } catch (e) {}
-      try {
-        await this.wavRecorder.quit();
-      } catch (e) {}
+    try {
+      console.log(`Switching to input device: ${deviceId}`);
+
+      if (this.wavRecorder) {
+        try {
+          await this.wavRecorder.end();
+        } catch (e) {
+          console.warn('Error ending recorder:', e);
+        }
+        try {
+          await this.wavRecorder.quit();
+        } catch (e) {
+          console.warn('Error quitting recorder:', e);
+        }
+      }
+
+      await this.wavRecorder.begin(deviceId);
+      await this.wavRecorder.record(this._handleDataAvailable, 1638);
+      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+
+      // Reinitialize VAD with the new audio stream if VAD is enabled
+      if (this.vadManager.isVADEnabled()) {
+        console.log('Reinitializing VAD with new audio stream');
+        const newStream = this.wavRecorder.getStream();
+        this.vadManager.reinitialize(newStream);
+      }
+
+      console.log(`Successfully switched to input device: ${deviceId}`);
+    } catch (error) {
+      console.error(`Failed to switch to input device ${deviceId}:`, error);
+      throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
     }
-    await this.wavRecorder.begin(deviceId);
-    await this.wavRecorder.record(this._handleDataAvailable, 1638);
-    this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+  }
+
+  /**
+   * Gets the default microphone device ID
+   * @returns {Promise<string|null>} The default device ID or null if no default device found
+   */
+  async getDefaultDeviceId(): Promise<string | null> {
+    try {
+      const devices = await this.wavRecorder.listDevices();
+      const defaultDevice = devices.find((device) => device.default === true);
+      return defaultDevice ? defaultDevice.deviceId : null;
+    } catch (error) {
+      console.error('Error getting default device:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Gets all available audio input devices with their current status
+   * @returns {Promise<Array<MediaDeviceInfo & { default: boolean, current: boolean }>>}
+   */
+  async getAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>> {
+    try {
+      const devices = await this.wavRecorder.listDevices();
+      const currentStream = this.wavRecorder.getStream();
+      const currentTrack = currentStream?.getAudioTracks()[0];
+
+      return devices.map((device) => ({
+        ...device,
+        current: currentTrack ? device.deviceId === currentTrack.getSettings().deviceId : false,
+      }));
+    } catch (error) {
+      console.error('Error getting audio devices:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Gets the currently active audio input device ID
+   * @returns {string|null} The current device ID or null if no device is active
+   */
+  getCurrentDeviceId(): string | null {
+    try {
+      const currentStream = this.wavRecorder.getStream();
+      const currentTrack = currentStream?.getAudioTracks()[0];
+      const deviceId = currentTrack?.getSettings().deviceId;
+      return deviceId || null;
+    } catch (error) {
+      console.error('Error getting current device ID:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Refreshes the device list by requesting new permissions and re-enumerating devices
+   * @returns {Promise<Array<MediaDeviceInfo & { default: boolean, current: boolean }>>}
+   */
+  async refreshAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>> {
+    try {
+      // Request permissions again to refresh the device list
+      await this.wavRecorder.requestPermission();
+      return await this.getAudioDevices();
+    } catch (error) {
+      console.error('Error refreshing audio devices:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Debug method to log current device status and help diagnose device selection issues
+   */
+  async logDeviceStatus(): Promise<void> {
+    try {
+      console.log('=== Device Status Debug ===');
+
+      const devices = await this.getAudioDevices();
+      console.log('Available devices:', devices);
+
+      const currentDeviceId = this.getCurrentDeviceId();
+      console.log('Current device ID:', currentDeviceId);
+
+      const defaultDeviceId = await this.getDefaultDeviceId();
+      console.log('Default device ID:', defaultDeviceId);
+
+      const currentStream = this.getStream();
+      if (currentStream) {
+        const tracks = currentStream.getAudioTracks();
+        console.log(
+          'Current stream tracks:',
+          tracks.map((track) => ({
+            deviceId: track.getSettings().deviceId,
+            label: track.label,
+            enabled: track.enabled,
+            muted: track.muted,
+          }))
+        );
+      } else {
+        console.log('No current stream');
+      }
+
+      console.log('=== End Device Status Debug ===');
+    } catch (error) {
+      console.error('Error logging device status:', error);
+    }
+  }
+
+  /**
+   * Forces VAD reinitialization with the current audio stream
+   * This can be useful for debugging device switching issues
+   */
+  async forceVADReinitialization(): Promise<void> {
+    try {
+      console.log('Forcing VAD reinitialization');
+      this.vadManager.forceReinitialization();
+      console.log('VAD reinitialization completed');
+    } catch (error) {
+      console.error('Error during VAD reinitialization:', error);
+      throw error;
+    }
   }
 }
 
