@@ -4,9 +4,9 @@ import {
   ClientAudioMessage,
   ClientTriggerTurnMessage,
   ClientTriggerResponseAudioReplayFinishedMessage,
-  ClientTriggerResponseAudioInterruptedMessage,
   ClientVadEventsMessage,
 } from './interfaces';
+import { base64ToArrayBuffer } from './utils';
 
 export interface WebSocketCallbacks {
   onConnect: (data: { sessionId: string | null }) => void;
@@ -143,15 +143,6 @@ export class WebSocketManager {
     } as ClientTriggerResponseAudioReplayFinishedMessage);
   }
 
-  /**
-   * Sends audio interrupted message
-   */
-  sendAudioInterrupted(turnId: string): void {
-    this.send({
-      type: 'trigger.response.audio.interrupted',
-      turn_id: turnId,
-    } as ClientTriggerResponseAudioInterruptedMessage);
-  }
 
   /**
    * Sends VAD event
@@ -213,14 +204,9 @@ export class WebSocketManager {
           this.callbacks.onTurnStart(message);
           break;
 
-        case 'turn.end':
-          // Handle turn end messages
-          console.log('Received turn.end message:', message);
-          break;
-
         case 'response.audio':
           // Convert base64 to ArrayBuffer and pass to callback
-          const audioBuffer = this._base64ToArrayBuffer(message.content);
+          const audioBuffer = base64ToArrayBuffer(message.content);
           this.callbacks.onResponseAudio(audioBuffer, message.turn_id);
           break;
 
@@ -251,16 +237,4 @@ export class WebSocketManager {
     this.callbacks.onStatusChange(status);
   }
 
-  /**
-   * Converts base64 string to ArrayBuffer
-   */
-  private _base64ToArrayBuffer(base64: string): ArrayBuffer {
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
-  }
 }

@@ -142,23 +142,16 @@ class LayercodeClient implements ILayercodeClient {
           console.log(`Audio device disconnected: ${deviceId}`);
           // You can add custom handling here, such as showing a notification to the user
         },
-        onDeviceSwitched: (fromDeviceId, toDeviceId) => {
+        onDeviceSwitched: async (fromDeviceId, toDeviceId) => {
           console.log(`Audio device automatically switched from ${fromDeviceId} to ${toDeviceId}`);
-          // You can add custom handling here, such as updating UI or notifying the user
-        },
-        onVADReinitializationRequired: () => {
-          console.log('VAD reinitialization required after device switch');
-          this._reinitializeVADAfterDeviceSwitch();
-        },
-        onAudioRecordingRestartRequired: () => {
-          console.log('Audio recording restart required after device switch');
-          this._restartAudioRecordingAfterDeviceSwitch();
+          // Reinitialize VAD and restart recording after device switch
+          await this._reinitializeVADAfterDeviceSwitch();
+          await this._restartAudioRecordingAfterDeviceSwitch();
         },
       },
       {
         autoSwitchOnDisconnect: true,
         listenForDeviceChanges: true,
-        devicePriority: ['default', 'system_default', 'first_available'],
       }
     );
 
@@ -175,10 +168,10 @@ class LayercodeClient implements ILayercodeClient {
         this.audioBuffer = []; // Clear buffer on speech end
         this.websocketManager.sendVADEvent('vad_end');
       },
-      onVADFailure: (error: any) => {
+      onVADFailure: (_error: any) => {
         this.websocketManager.sendVADEvent('vad_model_failed');
       },
-      onStatusChange: (status: string) => {
+      onStatusChange: (_status: string) => {
         // VAD status changes can be handled here if needed
       },
     });
@@ -273,19 +266,7 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private async _clientInterruptAssistantReplay(): Promise<void> {
-    const offsetData = await this.wavPlayer.interrupt();
-
-    if (offsetData && this.currentTurnId) {
-      let offsetMs = offsetData.currentTime * 1000;
-
-      // Send interruption event with accurate playback offset in milliseconds
-      this.websocketManager.sendAudioInterrupted(this.currentTurnId);
-    } else {
-      console.warn('Interruption requested but missing required data:', {
-        hasOffsetData: !!offsetData,
-        hasTurnId: !!this.currentTurnId,
-      });
-    }
+    await this.wavPlayer.interrupt();
   }
 
   async triggerUserTurnStarted(): Promise<void> {
@@ -595,7 +576,7 @@ class LayercodeClient implements ILayercodeClient {
    * Refreshes the current device ID from the current audio stream
    */
   refreshCurrentDeviceId(): void {
-    this.deviceManager.refreshCurrentDeviceId();
+    this.deviceManager.updateCurrentDeviceId();
   }
 
   /**
