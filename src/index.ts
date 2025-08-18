@@ -1,5 +1,5 @@
 /* eslint-env browser */
-import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
+import { WavRecorder, WavStreamPlayer } from './wavtools/';
 import { arrayBufferToBase64 } from './utils';
 import { VADManager, VADConfig } from './vad-manager';
 import { WebSocketManager } from './websocket';

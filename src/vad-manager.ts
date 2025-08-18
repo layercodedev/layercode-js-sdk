@@ -1,6 +1,5 @@
 // @ts-ignore - VAD package does not provide TypeScript types
 import { MicVAD } from '@ricky0123/vad-web';
-import { ClientVadEventsMessage } from './interfaces.js';
 
 export interface VADConfig {
   enabled?: boolean;

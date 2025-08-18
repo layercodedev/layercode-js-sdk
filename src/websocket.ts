@@ -6,7 +6,7 @@ import {
   ClientTriggerResponseAudioReplayFinishedMessage,
   ClientTriggerResponseAudioInterruptedMessage,
   ClientVadEventsMessage,
-} from './interfaces.js';
+} from './interfaces';
 
 export interface WebSocketCallbacks {
   onConnect: (data: { sessionId: string | null }) => void;
