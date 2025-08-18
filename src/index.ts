@@ -3,6 +3,7 @@ import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
 import { arrayBufferToBase64 } from './utils';
 import { VADManager, VADConfig } from './vad-manager';
 import { WebSocketManager } from './websocket';
+import { DeviceManager } from './device-manager';
 
 interface PipelineConfig {
   transcription: {
@@ -16,9 +17,6 @@ interface PipelineConfig {
 // SDK version - updated when publishing
 const SDK_VERSION = '1.0.27';
 
-/**
- * Interface for LayercodeClient public methods
- */
 interface ILayercodeClient {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -26,21 +24,14 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
-  getDefaultDeviceId(): Promise<string | null>;
-  getAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>>;
-  getCurrentDeviceId(): string | null;
-  refreshAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>>;
-  logDeviceStatus(): Promise<void>;
   forceVADReinitialization(): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
   readonly sessionId: string | null;
+  readonly deviceManager: DeviceManager;
 }
 
-/**
- * Interface for LayercodeClient constructor options
- */
 interface LayercodeClientOptions {
   /** The ID of the Layercode pipeline to connect to */
   pipelineId: string;
@@ -70,16 +61,13 @@ interface LayercodeClientOptions {
   onUserIsSpeakingChange?: (isSpeaking: boolean) => void;
 }
 
-/**
- * @class LayercodeClient
- * @classdesc Core client for Layercode audio pipeline that manages audio recording, WebSocket communication, and speech processing.
- */
 class LayercodeClient implements ILayercodeClient {
   private options: Required<LayercodeClientOptions>;
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
   private vadManager: VADManager;
   private websocketManager: WebSocketManager;
+  readonly deviceManager: DeviceManager;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
   private pushToTalkEnabled: boolean;
@@ -97,10 +85,6 @@ class LayercodeClient implements ILayercodeClient {
   agentAudioAmplitude: number;
   sessionId: string | null;
 
-  /**
-   * Creates an instance of LayercodeClient.
-   * @param {Object} options - Configuration options
-   */
   constructor(options: LayercodeClientOptions) {
     this.options = {
       pipelineId: options.pipelineId,
@@ -137,6 +121,17 @@ class LayercodeClient implements ILayercodeClient {
       onResponseAudio: this._handleResponseAudio.bind(this),
       onResponseText: this._handleResponseText.bind(this),
       onStatusChange: this._setStatus.bind(this),
+    });
+
+    // Initialize Device manager
+    this.deviceManager = new DeviceManager(this.wavRecorder, {
+      onDeviceChange: (devices) => {
+        // Handle device changes if needed
+        console.log('Device list updated:', devices);
+      },
+      onDeviceError: (error) => {
+        this.options.onError(error);
+      },
     });
 
     // Initialize VAD manager
@@ -179,22 +174,15 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _initializeVAD(): void {
-    const currentStream = this.wavRecorder.getStream();
+    const currentStream = this.deviceManager.getCurrentStream();
     this.vadManager.initialize(this.vadConfig || null, currentStream, this.pushToTalkEnabled);
   }
 
-  /**
-   * Updates the connection status and triggers the callback
-   * @param {string} status - New status value
-   */
   private _setStatus(status: string): void {
     this.status = status;
     this.options.onStatusChange(status);
   }
 
-  /**
-   * Handles when agent audio finishes playing
-   */
   private _clientResponseAudioReplayFinished(): void {
     console.log('clientResponseAudioReplayFinished');
     this.websocketManager.sendAudioReplayFinished(this.currentTurnId || '');
@@ -231,10 +219,6 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  /**
-   * Handles available client browser microphone audio data and sends it over the WebSocket
-   * @param {ArrayBuffer} data - The audio data buffer
-   */
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
       const base64 = arrayBufferToBase64(data.mono);
@@ -287,12 +271,6 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  /**
-   * Sets up amplitude monitoring for a given audio source.
-   * @param {WavRecorder | WavStreamPlayer} source - The audio source (recorder or player).
-   * @param {(amplitude: number) => void} callback - The callback function to invoke on amplitude change.
-   * @param {(amplitude: number) => void} updateInternalState - Function to update the internal amplitude state.
-   */
   private _setupAmplitudeMonitoring(source: WavRecorder | WavStreamPlayer, callback: (amplitude: number) => void, updateInternalState: (amplitude: number) => void): void {
     // Set up amplitude monitoring only if a callback is provided
     // Check against the default no-op function defined in the constructor options
@@ -312,8 +290,6 @@ class LayercodeClient implements ILayercodeClient {
 
   /**
    * Connects to the Layercode pipeline and starts the audio session
-   * @async
-   * @returns {Promise<void>}
    */
   async connect(): Promise<void> {
     try {
@@ -373,7 +349,7 @@ class LayercodeClient implements ILayercodeClient {
       await this.wavRecorder.begin();
 
       // Log the initial device selection for debugging
-      const initialStream = this.wavRecorder.getStream();
+      const initialStream = this.deviceManager.getCurrentStream();
       if (initialStream) {
         const tracks = initialStream.getAudioTracks();
         if (tracks.length > 0) {
@@ -482,35 +458,19 @@ class LayercodeClient implements ILayercodeClient {
     return this.wavRecorder.getStream();
   }
 
-  /**
-   * Switches the input device for the microphone and restarts recording
-   * @param {string} deviceId - The deviceId of the new microphone
-   */
   async setInputDevice(deviceId: string): Promise<void> {
     try {
-      console.log(`Switching to input device: ${deviceId}`);
+      // Use DeviceManager to switch devices
+      await this.deviceManager.setInputDevice(deviceId);
 
-      if (this.wavRecorder) {
-        try {
-          await this.wavRecorder.end();
-        } catch (e) {
-          console.warn('Error ending recorder:', e);
-        }
-        try {
-          await this.wavRecorder.quit();
-        } catch (e) {
-          console.warn('Error quitting recorder:', e);
-        }
-      }
-
-      await this.wavRecorder.begin(deviceId);
+      // Restart recording with the new device
       await this.wavRecorder.record(this._handleDataAvailable, 1638);
       this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
 
       // Reinitialize VAD with the new audio stream if VAD is enabled
       if (this.vadManager.isVADEnabled()) {
         console.log('Reinitializing VAD with new audio stream');
-        const newStream = this.wavRecorder.getStream();
+        const newStream = this.deviceManager.getCurrentStream();
         this.vadManager.reinitialize(newStream);
       }
 
@@ -521,114 +481,6 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  /**
-   * Gets the default microphone device ID
-   * @returns {Promise<string|null>} The default device ID or null if no default device found
-   */
-  async getDefaultDeviceId(): Promise<string | null> {
-    try {
-      const devices = await this.wavRecorder.listDevices();
-      const defaultDevice = devices.find((device) => device.default === true);
-      return defaultDevice ? defaultDevice.deviceId : null;
-    } catch (error) {
-      console.error('Error getting default device:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Gets all available audio input devices with their current status
-   * @returns {Promise<Array<MediaDeviceInfo & { default: boolean, current: boolean }>>}
-   */
-  async getAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>> {
-    try {
-      const devices = await this.wavRecorder.listDevices();
-      const currentStream = this.wavRecorder.getStream();
-      const currentTrack = currentStream?.getAudioTracks()[0];
-
-      return devices.map((device) => ({
-        ...device,
-        current: currentTrack ? device.deviceId === currentTrack.getSettings().deviceId : false,
-      }));
-    } catch (error) {
-      console.error('Error getting audio devices:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Gets the currently active audio input device ID
-   * @returns {string|null} The current device ID or null if no device is active
-   */
-  getCurrentDeviceId(): string | null {
-    try {
-      const currentStream = this.wavRecorder.getStream();
-      const currentTrack = currentStream?.getAudioTracks()[0];
-      const deviceId = currentTrack?.getSettings().deviceId;
-      return deviceId || null;
-    } catch (error) {
-      console.error('Error getting current device ID:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Refreshes the device list by requesting new permissions and re-enumerating devices
-   * @returns {Promise<Array<MediaDeviceInfo & { default: boolean, current: boolean }>>}
-   */
-  async refreshAudioDevices(): Promise<Array<MediaDeviceInfo & { default: boolean; current: boolean }>> {
-    try {
-      // Request permissions again to refresh the device list
-      await this.wavRecorder.requestPermission();
-      return await this.getAudioDevices();
-    } catch (error) {
-      console.error('Error refreshing audio devices:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Debug method to log current device status and help diagnose device selection issues
-   */
-  async logDeviceStatus(): Promise<void> {
-    try {
-      console.log('=== Device Status Debug ===');
-
-      const devices = await this.getAudioDevices();
-      console.log('Available devices:', devices);
-
-      const currentDeviceId = this.getCurrentDeviceId();
-      console.log('Current device ID:', currentDeviceId);
-
-      const defaultDeviceId = await this.getDefaultDeviceId();
-      console.log('Default device ID:', defaultDeviceId);
-
-      const currentStream = this.getStream();
-      if (currentStream) {
-        const tracks = currentStream.getAudioTracks();
-        console.log(
-          'Current stream tracks:',
-          tracks.map((track) => ({
-            deviceId: track.getSettings().deviceId,
-            label: track.label,
-            enabled: track.enabled,
-            muted: track.muted,
-          }))
-        );
-      } else {
-        console.log('No current stream');
-      }
-
-      console.log('=== End Device Status Debug ===');
-    } catch (error) {
-      console.error('Error logging device status:', error);
-    }
-  }
-
-  /**
-   * Forces VAD reinitialization with the current audio stream
-   * This can be useful for debugging device switching issues
-   */
   async forceVADReinitialization(): Promise<void> {
     try {
       console.log('Forcing VAD reinitialization');
