@@ -46,10 +46,13 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
+  mute(): void;
+  unmute(): void;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
   readonly sessionId: string | null;
+  readonly isMuted: boolean;
 }
 
 /**
@@ -82,6 +85,8 @@ interface LayercodeClientOptions {
   onStatusChange?: (status: string) => void;
   /** Callback when user turn changes */
   onUserIsSpeakingChange?: (isSpeaking: boolean) => void;
+  /** Callback when mute state changes */
+  onMuteStateChange?: (isMuted: boolean) => void;
 }
 
 /**
@@ -110,7 +115,8 @@ class LayercodeClient implements ILayercodeClient {
   userAudioAmplitude: number;
   agentAudioAmplitude: number;
   sessionId: string | null;
-
+  isMuted: boolean; // Track mute state
+  
   /**
    * Creates an instance of LayercodeClient.
    * @param {Object} options - Configuration options
@@ -130,6 +136,7 @@ class LayercodeClient implements ILayercodeClient {
       onAgentAmplitudeChange: options.onAgentAmplitudeChange || (() => {}),
       onStatusChange: options.onStatusChange || (() => {}),
       onUserIsSpeakingChange: options.onUserIsSpeakingChange || (() => {}),
+      onMuteStateChange: options.onMuteStateChange || (() => {}),
     };
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 10;
@@ -155,6 +162,7 @@ class LayercodeClient implements ILayercodeClient {
     this.currentTurnId = null;
     this.audioBuffer = [];
     this.vadConfig = null;
+    this.isMuted = false;
     // this.audioPauseTime = null;
 
     // Bind event handlers
@@ -366,6 +374,11 @@ class LayercodeClient implements ILayercodeClient {
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
       const base64 = arrayBufferToBase64(data.mono);
+
+      // Don't send audio if muted
+      if (this.isMuted) {
+        return;
+      }
 
       // Determine if we should gate audio based on VAD configuration
       const shouldGateAudio = this.vadConfig?.gate_audio !== false; // Default to true if not specified
@@ -608,6 +621,31 @@ class LayercodeClient implements ILayercodeClient {
     await this.wavRecorder.record(this._handleDataAvailable, 1638);
     this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
   }
+
+  /**
+   * Mutes the microphone to stop sending audio to the server
+   * The connection and recording remain active for quick unmute
+   */
+  mute(): void {
+    if (!this.isMuted) {
+      this.isMuted = true;
+      console.log('Microphone muted');
+      this.options.onMuteStateChange(true);
+    }
+  }
+
+  /**
+   * Unmutes the microphone to resume sending audio to the server
+   */
+  unmute(): void {
+    if (this.isMuted) {
+      this.isMuted = false;
+      console.log('Microphone unmuted');
+      this.options.onMuteStateChange(false);
+    }
+  }
+
+
 }
 
 export default LayercodeClient;
