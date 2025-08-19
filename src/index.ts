@@ -3,7 +3,6 @@ import { WavRecorder, WavStreamPlayer } from './wavtools/';
 import { arrayBufferToBase64 } from './utils';
 import { VADManager, VADConfig } from './vad-manager';
 import { WebSocketManager } from './websocket';
-import { DeviceManager } from './device-manager';
 
 interface PipelineConfig {
   transcription: {
@@ -24,16 +23,10 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
-  forceVADReinitialization(): Promise<void>;
-  switchToNextDevice(): Promise<void>;
-  refreshCurrentDeviceId(): void;
-  reinitializeVAD(): Promise<void>;
-  restartAudioRecording(): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
   readonly sessionId: string | null;
-  readonly deviceManager: DeviceManager;
 }
 
 interface LayercodeClientOptions {
@@ -53,8 +46,8 @@ interface LayercodeClientOptions {
   onDisconnect?: () => void;
   /** Callback when an error occurs */
   onError?: (error: Error) => void;
-  /** Callback when a device is disconnected */
-  onDeviceDisconnected?: (deviceId: string) => void;
+  /** Callback when a device is switched */
+  onDeviceSwitched?: (deviceId: string) => void;
   /** Callback for data messages */
   onDataMessage?: (message: any) => void;
   /** Callback for user audio amplitude changes */
@@ -73,7 +66,6 @@ class LayercodeClient implements ILayercodeClient {
   private wavPlayer: WavStreamPlayer;
   private vadManager: VADManager;
   private websocketManager: WebSocketManager;
-  readonly deviceManager: DeviceManager;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
   private pushToTalkEnabled: boolean;
@@ -84,6 +76,8 @@ class LayercodeClient implements ILayercodeClient {
   private currentTurnId: string | null; // Track current turn ID
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
   private vadConfig: PipelineConfig['vad'] | null;
+  private deviceId: string | null = null;
+
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -101,7 +95,7 @@ class LayercodeClient implements ILayercodeClient {
       onConnect: options.onConnect || (() => {}),
       onDisconnect: options.onDisconnect || (() => {}),
       onError: options.onError || (() => {}),
-      onDeviceDisconnected: options.onDeviceDisconnected || (() => {}),
+      onDeviceSwitched: options.onDeviceSwitched || (() => {}),
       onDataMessage: options.onDataMessage || (() => {}),
       onUserAmplitudeChange: options.onUserAmplitudeChange || (() => {}),
       onAgentAmplitudeChange: options.onAgentAmplitudeChange || (() => {}),
@@ -130,30 +124,6 @@ class LayercodeClient implements ILayercodeClient {
       onStatusChange: this._setStatus.bind(this),
     });
 
-    // Initialize Device manager
-    this.deviceManager = new DeviceManager(
-      this.wavRecorder,
-      {
-        onDeviceError: (error) => {
-          this.options.onError(error);
-        },
-        onDeviceDisconnected: (deviceId) => {
-          console.log(`Audio device disconnected: ${deviceId}`);
-          this.options.onDeviceDisconnected?.(deviceId);
-        },
-        onDeviceSwitched: async (fromDeviceId, toDeviceId) => {
-          console.log(`Audio device automatically switched from ${fromDeviceId} to ${toDeviceId}`);
-          // Reinitialize VAD and restart recording after device switch
-          await this._reinitializeVADAfterDeviceSwitch();
-          await this._restartAudioRecordingAfterDeviceSwitch();
-        },
-      },
-      {
-        autoSwitchOnDisconnect: true,
-        listenForDeviceChanges: true,
-      }
-    );
-
     // Initialize VAD manager
     this.vadManager = new VADManager({
       onSpeechStart: () => {
@@ -174,6 +144,9 @@ class LayercodeClient implements ILayercodeClient {
         // VAD status changes can be handled here if needed
       },
     });
+
+    this._setupDeviceChangeListener();
+
     this.status = 'disconnected';
     this.userAudioAmplitude = 0;
     this.agentAudioAmplitude = 0;
@@ -199,49 +172,22 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   /**
-   * Reinitializes VAD after a device switch to ensure it uses the new audio stream
-   */
-  private async _reinitializeVADAfterDeviceSwitch(): Promise<void> {
-    try {
-      console.log('Reinitializing VAD after device switch...');
-
-      // Get the new audio stream from the device manager
-      const newStream = this.wavRecorder.getStream();
-      if (!newStream) {
-        console.warn('No audio stream available for VAD reinitialization');
-        return;
-      }
-
-      // Reinitialize VAD with the new stream
-      if (this.vadManager.isVADEnabled()) {
-        console.log('Reinitializing VAD with new audio stream');
-        this.vadManager.reinitialize(newStream);
-      } else {
-        console.log('VAD is not enabled, skipping reinitialization');
-      }
-
-      console.log('VAD reinitialization completed successfully');
-    } catch (error) {
-      console.error('Error reinitializing VAD after device switch:', error);
-      this.options.onError(error instanceof Error ? error : new Error(String(error)));
-    }
-  }
-
-  /**
    * Restarts audio recording after a device switch to ensure audio is captured from the new device
    */
-  private async _restartAudioRecordingAfterDeviceSwitch(): Promise<void> {
+  private async _restartAudioRecording(): Promise<void> {
     try {
       console.log('Restarting audio recording after device switch...');
 
-      // Get the new audio stream from the device manager
-      const newStream = this.wavRecorder.getStream();
-      if (!newStream) {
-        console.warn('No audio stream available for audio recording restart');
-        return;
+      // Restart recording with the new device
+      try {
+        await this.wavRecorder.end();
+        await this.wavRecorder.quit();
+      } catch {
+        // Ignore cleanup errors
       }
 
-      // Restart recording with the new device
+      // Start with new device
+      await this.wavRecorder.begin(this.deviceId || undefined);
       await this.wavRecorder.record(this._handleDataAvailable, 1638);
 
       // Re-setup amplitude monitoring with the new stream
@@ -505,7 +451,7 @@ class LayercodeClient implements ILayercodeClient {
     this.vadManager.destroy();
 
     // Clean up device manager
-    this.deviceManager.destroy();
+    // this.deviceManager.destroy();
 
     this.wavRecorder.quit();
     this.wavPlayer.disconnect();
@@ -527,12 +473,10 @@ class LayercodeClient implements ILayercodeClient {
 
   async setInputDevice(deviceId: string): Promise<void> {
     try {
-      // Use DeviceManager to switch devices
-      await this.deviceManager.setInputDevice(deviceId);
+      this.deviceId = deviceId;
 
       // Restart recording with the new device
-      await this.wavRecorder.record(this._handleDataAvailable, 1638);
-      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+      await this._restartAudioRecording();
 
       // Reinitialize VAD with the new audio stream if VAD is enabled
       if (this.vadManager.isVADEnabled()) {
@@ -541,6 +485,9 @@ class LayercodeClient implements ILayercodeClient {
         this.vadManager.reinitialize(newStream);
       }
 
+      // Set up amplitude monitoring
+      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+
       console.log(`Successfully switched to input device: ${deviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -548,23 +495,18 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  async forceVADReinitialization(): Promise<void> {
-    try {
-      console.log('Forcing VAD reinitialization');
-      this.vadManager.forceReinitialization();
-      console.log('VAD reinitialization completed');
-    } catch (error) {
-      console.error('Error during VAD reinitialization:', error);
-      throw error;
-    }
-  }
-
   /**
    * Manually switches to the next available audio input device
    */
-  async switchToNextDevice(): Promise<void> {
+  private async _switchToNextDevice(): Promise<void> {
     try {
-      await this.deviceManager.switchToNextDevice();
+      const devices = await this.wavRecorder.listDevices();
+      const audioInputs = devices.filter((d) => d.kind === 'audioinput');
+      const nextDevice = audioInputs.find((d) => d.deviceId !== this.deviceId);
+
+      if (nextDevice) {
+        await this.setInputDevice(nextDevice.deviceId);
+      }
     } catch (error) {
       console.error('Error switching to next device:', error);
       throw error;
@@ -572,50 +514,42 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   /**
+   * Sets up the device change event listener
+   */
+  private _setupDeviceChangeListener(): void {
+    this.wavRecorder.listenForDeviceChange(async (devices) => {
+      try {
+        // Ensure we have current device ID
+        if (!this.deviceId) {
+          this._refreshCurrentDeviceId();
+        }
+
+        const currentDeviceExists = devices.some((device) => device.deviceId === this.deviceId);
+        if (!currentDeviceExists && this.deviceId) {
+          await this._switchToNextDevice();
+          // Device was switched
+          if (this.options.onDeviceSwitched) {
+            this.options.onDeviceSwitched(this.deviceId);
+          }
+        }
+      } catch (error) {
+        this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  /**
    * Refreshes the current device ID from the current audio stream
    */
-  refreshCurrentDeviceId(): void {
-    this.deviceManager.updateCurrentDeviceId();
-  }
-
-  /**
-   * Manually reinitializes VAD with the current audio stream
-   * Useful for debugging or when VAD needs to be refreshed after device changes
-   */
-  async reinitializeVAD(): Promise<void> {
+  private _refreshCurrentDeviceId(): void {
     try {
-      console.log('Manually reinitializing VAD...');
       const currentStream = this.wavRecorder.getStream();
-      if (currentStream && this.vadManager.isVADEnabled()) {
-        this.vadManager.reinitialize(currentStream);
-        console.log('VAD reinitialization completed successfully');
-      } else {
-        console.log('VAD reinitialization skipped - no stream or VAD not enabled');
+      const currentTrack = currentStream?.getAudioTracks()[0];
+      if (currentTrack) {
+        this.deviceId = currentTrack.getSettings().deviceId || null;
       }
     } catch (error) {
-      console.error('Error reinitializing VAD:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Manually restarts audio recording with the current audio stream
-   * Useful for debugging or when audio recording needs to be refreshed after device changes
-   */
-  async restartAudioRecording(): Promise<void> {
-    try {
-      console.log('Manually restarting audio recording...');
-      const currentStream = this.wavRecorder.getStream();
-      if (currentStream) {
-        await this.wavRecorder.record(this._handleDataAvailable, 1638);
-        this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
-        console.log('Audio recording restart completed successfully');
-      } else {
-        console.log('Audio recording restart skipped - no stream available');
-      }
-    } catch (error) {
-      console.error('Error restarting audio recording:', error);
-      throw error;
+      // Silent fail - device ID will be null
     }
   }
 }

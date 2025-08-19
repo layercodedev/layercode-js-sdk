@@ -147,20 +147,6 @@ export class VADManager {
   }
 
   /**
-   * Forces VAD reinitialization with the current audio stream
-   */
-  forceReinitialization(): void {
-    if (!this.isEnabled) {
-      console.log('VAD reinitialization skipped (not enabled)');
-      return;
-    }
-
-    console.log('Forcing VAD reinitialization');
-    this.destroy();
-    this._createVADInstance();
-  }
-
-  /**
    * Destroys the current VAD instance
    */
   destroy(): void {
