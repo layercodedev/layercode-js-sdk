@@ -177,11 +177,8 @@ class LayercodeClient implements ILayercodeClient {
   private async _restartAudioRecording(): Promise<void> {
     try {
       console.log('Restarting audio recording after device switch...');
-
-      // Restart recording with the new device
       try {
         await this.wavRecorder.end();
-        await this.wavRecorder.quit();
       } catch {
         // Ignore cleanup errors
       }
@@ -374,8 +371,6 @@ class LayercodeClient implements ILayercodeClient {
         }
       }
 
-      await this.wavRecorder.record(this._handleDataAvailable, 1638);
-
       // Initialize VAD now that we have an audio stream
       this._initializeVAD();
 
@@ -485,31 +480,10 @@ class LayercodeClient implements ILayercodeClient {
         this.vadManager.reinitialize(newStream);
       }
 
-      // Set up amplitude monitoring
-      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
-
       console.log(`Successfully switched to input device: ${deviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
       throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  /**
-   * Manually switches to the next available audio input device
-   */
-  private async _switchToNextDevice(): Promise<void> {
-    try {
-      const devices = await this.wavRecorder.listDevices();
-      const audioInputs = devices.filter((d) => d.kind === 'audioinput');
-      const nextDevice = audioInputs.find((d) => d.deviceId !== this.deviceId);
-
-      if (nextDevice) {
-        await this.setInputDevice(nextDevice.deviceId);
-      }
-    } catch (error) {
-      console.error('Error switching to next device:', error);
-      throw error;
     }
   }
 
@@ -519,38 +493,28 @@ class LayercodeClient implements ILayercodeClient {
   private _setupDeviceChangeListener(): void {
     this.wavRecorder.listenForDeviceChange(async (devices) => {
       try {
-        // Ensure we have current device ID
-        if (!this.deviceId) {
-          this._refreshCurrentDeviceId();
-        }
-
         const currentDeviceExists = devices.some((device) => device.deviceId === this.deviceId);
-        if (!currentDeviceExists && this.deviceId) {
-          await this._switchToNextDevice();
+        if (!currentDeviceExists) {
+          try {
+            const devices = await this.wavRecorder.listDevices();
+            const nextDevice = devices.find((d) => d.deviceId !== this.deviceId);
+            if (nextDevice) {
+              await this.setInputDevice(nextDevice.deviceId);
+            }
+          } catch (error) {
+            console.error('Error switching to next device:', error);
+            throw error;
+          }
+
           // Device was switched
           if (this.options.onDeviceSwitched) {
-            this.options.onDeviceSwitched(this.deviceId);
+            this.options.onDeviceSwitched(this.deviceId!);
           }
         }
       } catch (error) {
         this.options.onError(error instanceof Error ? error : new Error(String(error)));
       }
     });
-  }
-
-  /**
-   * Refreshes the current device ID from the current audio stream
-   */
-  private _refreshCurrentDeviceId(): void {
-    try {
-      const currentStream = this.wavRecorder.getStream();
-      const currentTrack = currentStream?.getAudioTracks()[0];
-      if (currentTrack) {
-        this.deviceId = currentTrack.getSettings().deviceId || null;
-      }
-    } catch (error) {
-      // Silent fail - device ID will be null
-    }
   }
 }
 
