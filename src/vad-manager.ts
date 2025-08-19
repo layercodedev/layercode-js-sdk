@@ -172,30 +172,9 @@ export class VADManager {
   }
 
   /**
-   * Gets the current VAD instance
-   */
-  getInstance(): MicVAD | null {
-    return this.vad;
-  }
-
-  /**
    * Checks if VAD is currently enabled
    */
   isVADEnabled(): boolean {
     return this.isEnabled;
-  }
-
-  /**
-   * Gets the current VAD configuration
-   */
-  getConfig(): VADConfig | null {
-    return this.config;
-  }
-
-  /**
-   * Gets the current audio stream
-   */
-  getCurrentStream(): MediaStream | null {
-    return this.currentStream;
   }
 }

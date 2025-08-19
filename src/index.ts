@@ -53,6 +53,8 @@ interface LayercodeClientOptions {
   onDisconnect?: () => void;
   /** Callback when an error occurs */
   onError?: (error: Error) => void;
+  /** Callback when a device is disconnected */
+  onDeviceDisconnected?: (deviceId: string) => void;
   /** Callback for data messages */
   onDataMessage?: (message: any) => void;
   /** Callback for user audio amplitude changes */
@@ -99,6 +101,7 @@ class LayercodeClient implements ILayercodeClient {
       onConnect: options.onConnect || (() => {}),
       onDisconnect: options.onDisconnect || (() => {}),
       onError: options.onError || (() => {}),
+      onDeviceDisconnected: options.onDeviceDisconnected || (() => {}),
       onDataMessage: options.onDataMessage || (() => {}),
       onUserAmplitudeChange: options.onUserAmplitudeChange || (() => {}),
       onAgentAmplitudeChange: options.onAgentAmplitudeChange || (() => {}),
@@ -131,16 +134,12 @@ class LayercodeClient implements ILayercodeClient {
     this.deviceManager = new DeviceManager(
       this.wavRecorder,
       {
-        onDeviceChange: (devices) => {
-          // Handle device changes if needed
-          console.log('Device list updated:', devices);
-        },
         onDeviceError: (error) => {
           this.options.onError(error);
         },
         onDeviceDisconnected: (deviceId) => {
           console.log(`Audio device disconnected: ${deviceId}`);
-          // You can add custom handling here, such as showing a notification to the user
+          this.options.onDeviceDisconnected?.(deviceId);
         },
         onDeviceSwitched: async (fromDeviceId, toDeviceId) => {
           console.log(`Audio device automatically switched from ${fromDeviceId} to ${toDeviceId}`);
@@ -195,7 +194,7 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _initializeVAD(): void {
-    const currentStream = this.deviceManager.getCurrentStream();
+    const currentStream = this.wavRecorder.getStream();
     this.vadManager.initialize(this.vadConfig || null, currentStream, this.pushToTalkEnabled);
   }
 
@@ -207,7 +206,7 @@ class LayercodeClient implements ILayercodeClient {
       console.log('Reinitializing VAD after device switch...');
 
       // Get the new audio stream from the device manager
-      const newStream = this.deviceManager.getCurrentStream();
+      const newStream = this.wavRecorder.getStream();
       if (!newStream) {
         console.warn('No audio stream available for VAD reinitialization');
         return;
@@ -236,7 +235,7 @@ class LayercodeClient implements ILayercodeClient {
       console.log('Restarting audio recording after device switch...');
 
       // Get the new audio stream from the device manager
-      const newStream = this.deviceManager.getCurrentStream();
+      const newStream = this.wavRecorder.getStream();
       if (!newStream) {
         console.warn('No audio stream available for audio recording restart');
         return;
@@ -414,7 +413,7 @@ class LayercodeClient implements ILayercodeClient {
       await this.wavRecorder.begin();
 
       // Log the initial device selection for debugging
-      const initialStream = this.deviceManager.getCurrentStream();
+      const initialStream = this.wavRecorder.getStream();
       if (initialStream) {
         const tracks = initialStream.getAudioTracks();
         if (tracks.length > 0) {
@@ -538,7 +537,7 @@ class LayercodeClient implements ILayercodeClient {
       // Reinitialize VAD with the new audio stream if VAD is enabled
       if (this.vadManager.isVADEnabled()) {
         console.log('Reinitializing VAD with new audio stream');
-        const newStream = this.deviceManager.getCurrentStream();
+        const newStream = this.wavRecorder.getStream();
         this.vadManager.reinitialize(newStream);
       }
 
@@ -586,7 +585,7 @@ class LayercodeClient implements ILayercodeClient {
   async reinitializeVAD(): Promise<void> {
     try {
       console.log('Manually reinitializing VAD...');
-      const currentStream = this.deviceManager.getCurrentStream();
+      const currentStream = this.wavRecorder.getStream();
       if (currentStream && this.vadManager.isVADEnabled()) {
         this.vadManager.reinitialize(currentStream);
         console.log('VAD reinitialization completed successfully');
@@ -606,7 +605,7 @@ class LayercodeClient implements ILayercodeClient {
   async restartAudioRecording(): Promise<void> {
     try {
       console.log('Manually restarting audio recording...');
-      const currentStream = this.deviceManager.getCurrentStream();
+      const currentStream = this.wavRecorder.getStream();
       if (currentStream) {
         await this.wavRecorder.record(this._handleDataAvailable, 1638);
         this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));

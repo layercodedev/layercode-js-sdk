@@ -6,7 +6,6 @@ export interface AudioDevice {
 }
 
 export interface DeviceManagerCallbacks {
-  onDeviceChange: (devices: AudioDevice[]) => void;
   onDeviceError: (error: Error) => void;
   onDeviceDisconnected?: (deviceId: string) => void;
   onDeviceSwitched?: (fromDeviceId: string, toDeviceId: string) => void;
@@ -92,13 +91,9 @@ export class DeviceManager {
 
           // Auto-switch if enabled
           if (this.options.autoSwitchOnDisconnect) {
-            await this._switchToNextDevice();
+            await this.switchToNextDevice();
           }
         }
-
-        // Update device list
-        const audioDevices = await this.getAudioDevices();
-        this.callbacks.onDeviceChange(audioDevices);
       } catch (error) {
         this.handleError('Error handling device change:', error);
       }
@@ -110,48 +105,24 @@ export class DeviceManager {
   /**
    * Switches to the next available device
    */
-  private async _switchToNextDevice(): Promise<void> {
+  async switchToNextDevice(): Promise<void> {
     try {
       const devices = await this.wavRecorder.listDevices();
       const audioInputs = devices.filter((d: MediaDeviceWithDefault) => d.kind === 'audioinput');
-      
+
       // Find first device that's not the current one
       const nextDevice = audioInputs.find((d: MediaDeviceWithDefault) => d.deviceId !== this.currentDeviceId);
-      
+
       if (nextDevice) {
         const fromDeviceId = this.currentDeviceId;
         await this.setInputDevice(nextDevice.deviceId);
-        
+
         if (this.callbacks.onDeviceSwitched && fromDeviceId) {
           this.callbacks.onDeviceSwitched(fromDeviceId, nextDevice.deviceId);
         }
       }
     } catch (error) {
       this.handleError('Failed to auto-switch device:', error);
-    }
-  }
-
-  /**
-   * Gets all available audio input devices
-   */
-  async getAudioDevices(): Promise<AudioDevice[]> {
-    try {
-      const devices = await this.wavRecorder.listDevices();
-      const currentStream = this.wavRecorder.getStream();
-      const currentTrack = currentStream?.getAudioTracks()[0];
-      const currentDeviceId = currentTrack?.getSettings().deviceId;
-
-      return devices
-        .filter((device: MediaDeviceWithDefault) => device.kind === 'audioinput')
-        .map((device: MediaDeviceWithDefault) => ({
-          deviceId: device.deviceId,
-          label: device.label || 'Unknown Device',
-          default: device.default || false,
-          current: device.deviceId === currentDeviceId,
-        }));
-    } catch (error) {
-      this.handleError('Error getting audio devices:', error);
-      return [];
     }
   }
 
@@ -171,28 +142,10 @@ export class DeviceManager {
       // Start with new device
       await this.wavRecorder.begin(deviceId);
       this.currentDeviceId = deviceId;
-
-      // Notify about device change
-      const devices = await this.getAudioDevices();
-      this.callbacks.onDeviceChange(devices);
     } catch (error) {
       const err = this.handleError(`Failed to switch to device ${deviceId}:`, error);
       throw err;
     }
-  }
-
-  /**
-   * Gets the current audio stream
-   */
-  getCurrentStream(): MediaStream | null {
-    return this.wavRecorder.getStream();
-  }
-
-  /**
-   * Manually triggers a device switch to the next available device
-   */
-  async switchToNextDevice(): Promise<void> {
-    await this._switchToNextDevice();
   }
 
   /**
