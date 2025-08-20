@@ -34,7 +34,7 @@ interface PipelineConfig {
 }
 
 // SDK version - updated when publishing
-const SDK_VERSION = '1.0.26';
+const SDK_VERSION = '1.0.27';
 
 /**
  * Interface for LayercodeClient public methods
@@ -72,6 +72,8 @@ interface LayercodeClientOptions {
   onDisconnect?: () => void;
   /** Callback when an error occurs */
   onError?: (error: Error) => void;
+  /** Callback when a device is switched */
+  onDeviceSwitched?: (deviceId: string) => void;
   /** Callback for data messages */
   onDataMessage?: (message: any) => void;
   /** Callback for user audio amplitude changes */
@@ -104,6 +106,7 @@ class LayercodeClient implements ILayercodeClient {
   private currentTurnId: string | null; // Track current turn ID
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
   private vadConfig: PipelineConfig['vad'] | null;
+  private deviceId: string | null = null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -125,6 +128,7 @@ class LayercodeClient implements ILayercodeClient {
       onConnect: options.onConnect || (() => {}),
       onDisconnect: options.onDisconnect || (() => {}),
       onError: options.onError || (() => {}),
+      onDeviceSwitched: options.onDeviceSwitched || (() => {}),
       onDataMessage: options.onDataMessage || (() => {}),
       onUserAmplitudeChange: options.onUserAmplitudeChange || (() => {}),
       onAgentAmplitudeChange: options.onAgentAmplitudeChange || (() => {}),
@@ -160,6 +164,8 @@ class LayercodeClient implements ILayercodeClient {
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
     this._handleDataAvailable = this._handleDataAvailable.bind(this);
+
+    this._setupDeviceChangeListener();
   }
 
   private _initializeVAD(): void {
@@ -230,7 +236,7 @@ class LayercodeClient implements ILayercodeClient {
         console.log('VAD started successfully');
       })
       .catch((error: any) => {
-        console.error('Error initializing VAD:', error);
+        console.warn('Error initializing VAD:', error);
         // Send a message to server indicating VAD failure
         this._wsSend({
           type: 'vad_events',
@@ -350,7 +356,7 @@ class LayercodeClient implements ILayercodeClient {
           this.options.onDataMessage(message);
           break;
         default:
-          console.error('Unknown message type received:', message);
+          console.warn('Unknown message type received:', message);
           break;
       }
     } catch (error) {
@@ -511,7 +517,6 @@ class LayercodeClient implements ILayercodeClient {
       } else {
         throw new Error(`Unknown trigger: ${config.transcription.trigger}`);
       }
-      this._initializeVAD();
 
       // Bind the websocket message callbacks
       this.ws.onmessage = this._handleWebSocketMessage;
@@ -534,20 +539,10 @@ class LayercodeClient implements ILayercodeClient {
         this.options.onError(new Error('WebSocket connection error'));
       };
 
-      // Initialize microphone audio capture
-      await this.wavRecorder.begin();
-      await this.wavRecorder.record(this._handleDataAvailable, 1638);
-      // Set up microphone amplitude monitoring
-      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
-
       // Initialize audio player
       await this.wavPlayer.connect();
       // Set up audio player amplitude monitoring
       this._setupAmplitudeMonitoring(this.wavPlayer, this.options.onAgentAmplitudeChange, (amp) => (this.agentAudioAmplitude = amp));
-
-      // Mark recorder as started and attempt to notify server
-      this.recorderStarted = true;
-      this._sendReadyIfNeeded();
     } catch (error) {
       console.error('Error connecting to Layercode pipeline:', error);
       this._setStatus('error');
@@ -568,6 +563,8 @@ class LayercodeClient implements ILayercodeClient {
       this.vad.destroy();
       this.vad = null;
     }
+
+    this.wavRecorder.listenForDeviceChange(null);
 
     this.wavRecorder.quit();
     this.wavPlayer.disconnect();
@@ -596,17 +593,104 @@ class LayercodeClient implements ILayercodeClient {
    * @param {string} deviceId - The deviceId of the new microphone
    */
   async setInputDevice(deviceId: string): Promise<void> {
-    if (this.wavRecorder) {
+    try {
+      this.deviceId = deviceId;
+
+      // Restart recording with the new device
+      await this._restartAudioRecording();
+
+      // Reinitialize VAD with the new audio stream if VAD is enabled
+      const shouldUseVAD = !this.pushToTalkEnabled && this.vadConfig?.enabled !== false;
+      if (shouldUseVAD) {
+        console.log('Reinitializing VAD with new audio stream');
+        const newStream = this.wavRecorder.getStream();
+        await this._reinitializeVAD(newStream);
+      }
+      console.log(`Successfully switched to input device: ${deviceId}`);
+    } catch (error) {
+      console.error(`Failed to switch to input device ${deviceId}:`, error);
+      throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Restarts audio recording after a device switch to ensure audio is captured from the new device
+   */
+  private async _restartAudioRecording(): Promise<void> {
+    try {
+      console.log('Restarting audio recording after device switch...');
       try {
         await this.wavRecorder.end();
-      } catch (e) {}
-      try {
-        await this.wavRecorder.quit();
-      } catch (e) {}
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      // Start with new device
+      await this.wavRecorder.begin(this.deviceId || undefined);
+      await this.wavRecorder.record(this._handleDataAvailable, 1638);
+
+      // Re-setup amplitude monitoring with the new stream
+      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+
+      console.log('Audio recording restart completed successfully');
+    } catch (error) {
+      console.error('Error restarting audio recording after device switch:', error);
+      this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
-    await this.wavRecorder.begin(deviceId);
-    await this.wavRecorder.record(this._handleDataAvailable, 1638);
-    this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+  }
+
+  /**
+   * Reinitializes VAD with a new stream (used after device switching)
+   */
+  private async _reinitializeVAD(stream: MediaStream | null): Promise<void> {
+    // Clean up existing VAD
+    if (this.vad) {
+      this.vad.pause();
+      this.vad.destroy();
+      this.vad = null;
+    }
+
+    // Reinitialize with new stream
+    if (stream) {
+      this._initializeVAD();
+    }
+  }
+
+  /**
+   * Sets up the device change event listener
+   */
+  private _setupDeviceChangeListener(): void {
+    this.wavRecorder.listenForDeviceChange(async (devices: any[]) => {
+      try {
+        const currentDeviceExists = devices.some((device: any) => device.deviceId === this.deviceId);
+        if (!currentDeviceExists) {
+          console.log('Current device disconnected, switching to next available device');
+          try {
+            const availableDevices = await this.wavRecorder.listDevices();
+            const nextDevice = availableDevices.find((d: any) => d.deviceId !== this.deviceId && d.deviceId !== 'default');
+            if (nextDevice) {
+              await this.setInputDevice(nextDevice.deviceId);
+              // Mark recorder as started and attempt to notify server
+              if (!this.recorderStarted) {
+                this.recorderStarted = true;
+                this._sendReadyIfNeeded();
+              }
+              // Notify about device switch
+              if (this.options.onDeviceSwitched) {
+                this.options.onDeviceSwitched(nextDevice.deviceId);
+              }
+            } else {
+              console.warn('No alternative audio device found');
+            }
+          } catch (error) {
+            console.error('Error switching to next device:', error);
+            throw error;
+          }
+        }
+      } catch (error) {
+        this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 }
 
