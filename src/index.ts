@@ -543,6 +543,10 @@ class LayercodeClient implements ILayercodeClient {
       await this.wavPlayer.connect();
       // Set up audio player amplitude monitoring
       this._setupAmplitudeMonitoring(this.wavPlayer, this.options.onAgentAmplitudeChange, (amp) => (this.agentAudioAmplitude = amp));
+
+      // wavRecorder will be started from the onDeviceSwitched callback,
+      // which is called when the device is first initialized and also when the device is switched
+      // this is to ensure that the device is initialized before the recorder is started
     } catch (error) {
       console.error('Error connecting to Layercode pipeline:', error);
       this._setStatus('error');
@@ -666,8 +670,7 @@ class LayercodeClient implements ILayercodeClient {
         if (!currentDeviceExists) {
           console.log('Current device disconnected, switching to next available device');
           try {
-            const availableDevices = await this.wavRecorder.listDevices();
-            const nextDevice = availableDevices.find((d: any) => d.deviceId !== this.deviceId && d.deviceId !== 'default');
+            const nextDevice = devices.find((d: any) => d.default);
             if (nextDevice) {
               await this.setInputDevice(nextDevice.deviceId);
               // Mark recorder as started and attempt to notify server
