@@ -13,7 +13,7 @@ import {
   ClientVadEventsMessage,
 } from './interfaces.js';
 
-interface PipelineConfig {
+interface AgentConfig {
   transcription: {
     trigger: 'push_to_talk' | 'automatic';
     can_interrupt: boolean;
@@ -56,8 +56,8 @@ interface ILayercodeClient {
  * Interface for LayercodeClient constructor options
  */
 interface LayercodeClientOptions {
-  /** The ID of the Layercode pipeline to connect to */
-  pipelineId: string;
+  /** The ID of the Layercode agent to connect to */
+  agentId: string;
   /** The ID of the session to connect to */
   sessionId?: string | null;
   /** The endpoint URL for the audio agent API */
@@ -88,7 +88,7 @@ interface LayercodeClientOptions {
 
 /**
  * @class LayercodeClient
- * @classdesc Core client for Layercode audio pipeline that manages audio recording, WebSocket communication, and speech processing.
+ * @classdesc Core client for Layercode audio agent that manages audio recording, WebSocket communication, and speech processing.
  */
 class LayercodeClient implements ILayercodeClient {
   private options: Required<LayercodeClientOptions>;
@@ -105,7 +105,7 @@ class LayercodeClient implements ILayercodeClient {
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
-  private vadConfig: PipelineConfig['vad'] | null;
+  private vadConfig: AgentConfig['vad'] | null;
   private deviceId: string | null = null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
@@ -120,7 +120,7 @@ class LayercodeClient implements ILayercodeClient {
    */
   constructor(options: LayercodeClientOptions) {
     this.options = {
-      pipelineId: options.pipelineId,
+      agentId: options.agentId,
       sessionId: options.sessionId || null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
       metadata: options.metadata || {},
@@ -137,12 +137,12 @@ class LayercodeClient implements ILayercodeClient {
     };
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 10;
-    this._websocketUrl = 'wss://api.layercode.com/v1/pipelines/websocket';
+    this._websocketUrl = 'wss://api.layercode.com/v1/agents/websocket';
 
-    this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched pipeline config
+    this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
     this.wavPlayer = new WavStreamPlayer({
       finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
-      sampleRate: 16000, // TODO should be set my fetched pipeline config
+      sampleRate: 16000, // TODO should be set my fetched agent config
     });
     this.vad = null;
     this.ws = null;
@@ -463,7 +463,7 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   /**
-   * Connects to the Layercode pipeline and starts the audio session
+   * Connects to the Layercode agent and starts the audio session
    * @async
    * @returns {Promise<void>}
    */
@@ -476,10 +476,10 @@ class LayercodeClient implements ILayercodeClient {
 
       // Get session key from server
       let authorizeSessionRequestBody = {
-        pipeline_id: this.options.pipelineId,
+        agent_id: this.options.agentId,
         metadata: this.options.metadata,
         sdk_version: SDK_VERSION,
-      } as { pipeline_id: string; metadata: Record<string, any>; sdk_version: string; session_id?: string };
+      } as { agent_id: string; metadata: Record<string, any>; sdk_version: string; session_id?: string };
       // If we're reconnecting to a previous session, we need to include the session_id in the request. Otherwise we don't send session_id, and a new session will be created and the session_id will be returned in the response.
       if (this.options.sessionId) {
         authorizeSessionRequestBody.session_id = this.options.sessionId;
@@ -503,7 +503,7 @@ class LayercodeClient implements ILayercodeClient {
           client_session_key: authorizeSessionResponseBody.client_session_key,
         })}`
       );
-      const config: PipelineConfig = authorizeSessionResponseBody.config;
+      const config: AgentConfig = authorizeSessionResponseBody.config;
       console.log('config', config);
 
       // Store VAD configuration
@@ -548,7 +548,7 @@ class LayercodeClient implements ILayercodeClient {
       // which is called when the device is first initialized and also when the device is switched
       // this is to ensure that the device is initialized before the recorder is started
     } catch (error) {
-      console.error('Error connecting to Layercode pipeline:', error);
+      console.error('Error connecting to Layercode agent:', error);
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
       throw error;

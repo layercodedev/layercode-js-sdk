@@ -1,6 +1,6 @@
 # Layercode JavaScript SDK
 
-A JavaScript SDK for integrating Layercode voice pipelines into web applications.
+A JavaScript SDK for integrating Layercode voice agents into web applications.
 
 ## Installation
 
