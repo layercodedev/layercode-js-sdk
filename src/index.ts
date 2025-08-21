@@ -34,7 +34,7 @@ interface AgentConfig {
 }
 
 // SDK version - updated when publishing
-const SDK_VERSION = '1.0.27';
+const SDK_VERSION = '2.0.0';
 
 /**
  * Interface for LayercodeClient public methods
