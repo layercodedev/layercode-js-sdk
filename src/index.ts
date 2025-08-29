@@ -13,7 +13,7 @@ import {
   ClientVadEventsMessage,
 } from './interfaces.js';
 
-interface PipelineConfig {
+interface AgentConfig {
   transcription: {
     trigger: 'push_to_talk' | 'automatic';
     can_interrupt: boolean;
@@ -34,7 +34,7 @@ interface PipelineConfig {
 }
 
 // SDK version - updated when publishing
-const SDK_VERSION = '1.0.27';
+const SDK_VERSION = '2.0.0';
 
 /**
  * Interface for LayercodeClient public methods
@@ -49,17 +49,17 @@ interface ILayercodeClient {
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
-  readonly sessionId: string | null;
+  readonly conversationId: string | null;
 }
 
 /**
  * Interface for LayercodeClient constructor options
  */
 interface LayercodeClientOptions {
-  /** The ID of the Layercode pipeline to connect to */
-  pipelineId: string;
-  /** The ID of the session to connect to */
-  sessionId?: string | null;
+  /** The ID of the Layercode agent to connect to */
+  agentId: string;
+  /** The ID of the conversation to connect to */
+  conversationId?: string | null;
   /** The endpoint URL for the audio agent API */
   authorizeSessionEndpoint: string;
   /** Metadata to send with webhooks */
@@ -67,7 +67,7 @@ interface LayercodeClientOptions {
   /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
-  onConnect?: ({ sessionId }: { sessionId: string | null }) => void;
+  onConnect?: ({ conversationId }: { conversationId: string | null }) => void;
   /** Callback when connection is closed */
   onDisconnect?: () => void;
   /** Callback when an error occurs */
@@ -88,7 +88,7 @@ interface LayercodeClientOptions {
 
 /**
  * @class LayercodeClient
- * @classdesc Core client for Layercode audio pipeline that manages audio recording, WebSocket communication, and speech processing.
+ * @classdesc Core client for Layercode audio agent that manages audio recording, WebSocket communication, and speech processing.
  */
 class LayercodeClient implements ILayercodeClient {
   private options: Required<LayercodeClientOptions>;
@@ -105,14 +105,14 @@ class LayercodeClient implements ILayercodeClient {
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
-  private vadConfig: PipelineConfig['vad'] | null;
+  private vadConfig: AgentConfig['vad'] | null;
   private deviceId: string | null = null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
   agentAudioAmplitude: number;
-  sessionId: string | null;
+  conversationId: string | null;
 
   /**
    * Creates an instance of LayercodeClient.
@@ -120,8 +120,8 @@ class LayercodeClient implements ILayercodeClient {
    */
   constructor(options: LayercodeClientOptions) {
     this.options = {
-      pipelineId: options.pipelineId,
-      sessionId: options.sessionId || null,
+      agentId: options.agentId,
+      conversationId: options.conversationId || null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
       metadata: options.metadata || {},
       vadResumeDelay: options.vadResumeDelay || 500,
@@ -137,19 +137,19 @@ class LayercodeClient implements ILayercodeClient {
     };
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 10;
-    this._websocketUrl = 'wss://api.layercode.com/v1/pipelines/websocket';
+    this._websocketUrl = 'wss://api.layercode.com/v1/agents/websocket';
 
-    this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched pipeline config
+    this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
     this.wavPlayer = new WavStreamPlayer({
       finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
-      sampleRate: 16000, // TODO should be set my fetched pipeline config
+      sampleRate: 16000, // TODO should be set my fetched agent config
     });
     this.vad = null;
     this.ws = null;
     this.status = 'disconnected';
     this.userAudioAmplitude = 0;
     this.agentAudioAmplitude = 0;
-    this.sessionId = options.sessionId || null;
+    this.conversationId = options.conversationId || null;
     this.pushToTalkActive = false;
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
@@ -463,7 +463,7 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   /**
-   * Connects to the Layercode pipeline and starts the audio session
+   * Connects to the Layercode agent and starts the audio conversation
    * @async
    * @returns {Promise<void>}
    */
@@ -474,15 +474,15 @@ class LayercodeClient implements ILayercodeClient {
       // Reset turn tracking for clean start
       this._resetTurnTracking();
 
-      // Get session key from server
+      // Get conversation key from server
       let authorizeSessionRequestBody = {
-        pipeline_id: this.options.pipelineId,
+        agent_id: this.options.agentId,
         metadata: this.options.metadata,
         sdk_version: SDK_VERSION,
-      } as { pipeline_id: string; metadata: Record<string, any>; sdk_version: string; session_id?: string };
-      // If we're reconnecting to a previous session, we need to include the session_id in the request. Otherwise we don't send session_id, and a new session will be created and the session_id will be returned in the response.
-      if (this.options.sessionId) {
-        authorizeSessionRequestBody.session_id = this.options.sessionId;
+      } as { agent_id: string; metadata: Record<string, any>; sdk_version: string; conversation_id?: string };
+      // If we're reconnecting to a previous conversation, we need to include the conversation_id in the request. Otherwise we don't send conversation_id, and a new conversation will be created and the conversation_id will be returned in the response.
+      if (this.options.conversationId) {
+        authorizeSessionRequestBody.conversation_id = this.options.conversationId;
       }
       const authorizeSessionResponse = await fetch(this.options.authorizeSessionEndpoint, {
         method: 'POST',
@@ -492,10 +492,10 @@ class LayercodeClient implements ILayercodeClient {
         body: JSON.stringify(authorizeSessionRequestBody),
       });
       if (!authorizeSessionResponse.ok) {
-        throw new Error(`Failed to authorize session: ${authorizeSessionResponse.statusText}`);
+        throw new Error(`Failed to authorize conversation: ${authorizeSessionResponse.statusText}`);
       }
       const authorizeSessionResponseBody = await authorizeSessionResponse.json();
-      this.sessionId = authorizeSessionResponseBody.session_id; // Save the session_id for use in future reconnects
+      this.conversationId = authorizeSessionResponseBody.conversation_id; // Save the conversation_id for use in future reconnects
 
       // Connect WebSocket
       this.ws = new WebSocket(
@@ -503,7 +503,7 @@ class LayercodeClient implements ILayercodeClient {
           client_session_key: authorizeSessionResponseBody.client_session_key,
         })}`
       );
-      const config: PipelineConfig = authorizeSessionResponseBody.config;
+      const config: AgentConfig = authorizeSessionResponseBody.config;
       console.log('config', config);
 
       // Store VAD configuration
@@ -523,7 +523,7 @@ class LayercodeClient implements ILayercodeClient {
       this.ws.onopen = () => {
         console.log('WebSocket connection established');
         this._setStatus('connected');
-        this.options.onConnect({ sessionId: this.sessionId });
+        this.options.onConnect({ conversationId: this.conversationId });
 
         // Attempt to send ready message if recorder already started
         this._sendReadyIfNeeded();
@@ -548,7 +548,7 @@ class LayercodeClient implements ILayercodeClient {
       // which is called when the device is first initialized and also when the device is switched
       // this is to ensure that the device is initialized before the recorder is started
     } catch (error) {
-      console.error('Error connecting to Layercode pipeline:', error);
+      console.error('Error connecting to Layercode agent:', error);
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
       throw error;
