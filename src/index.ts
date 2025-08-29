@@ -137,7 +137,7 @@ class LayercodeClient implements ILayercodeClient {
     };
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 10;
-    this._websocketUrl = 'wss://api.layercode.com/v1/agents/websocket';
+    this._websocketUrl = 'wss://api.layercode.com/v1/agents/web/websocket';
 
     this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
     this.wavPlayer = new WavStreamPlayer({
