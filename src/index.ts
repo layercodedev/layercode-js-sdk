@@ -49,7 +49,7 @@ interface ILayercodeClient {
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
-  readonly sessionId: string | null;
+  readonly conversationId: string | null;
 }
 
 /**
@@ -58,8 +58,8 @@ interface ILayercodeClient {
 interface LayercodeClientOptions {
   /** The ID of the Layercode agent to connect to */
   agentId: string;
-  /** The ID of the session to connect to */
-  sessionId?: string | null;
+  /** The ID of the conversation to connect to */
+  conversationId?: string | null;
   /** The endpoint URL for the audio agent API */
   authorizeSessionEndpoint: string;
   /** Metadata to send with webhooks */
@@ -67,7 +67,7 @@ interface LayercodeClientOptions {
   /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
-  onConnect?: ({ sessionId }: { sessionId: string | null }) => void;
+  onConnect?: ({ conversationId }: { conversationId: string | null }) => void;
   /** Callback when connection is closed */
   onDisconnect?: () => void;
   /** Callback when an error occurs */
@@ -112,7 +112,7 @@ class LayercodeClient implements ILayercodeClient {
   status: string;
   userAudioAmplitude: number;
   agentAudioAmplitude: number;
-  sessionId: string | null;
+  conversationId: string | null;
 
   /**
    * Creates an instance of LayercodeClient.
@@ -121,7 +121,7 @@ class LayercodeClient implements ILayercodeClient {
   constructor(options: LayercodeClientOptions) {
     this.options = {
       agentId: options.agentId,
-      sessionId: options.sessionId || null,
+      conversationId: options.conversationId || null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
       metadata: options.metadata || {},
       vadResumeDelay: options.vadResumeDelay || 500,
@@ -149,7 +149,7 @@ class LayercodeClient implements ILayercodeClient {
     this.status = 'disconnected';
     this.userAudioAmplitude = 0;
     this.agentAudioAmplitude = 0;
-    this.sessionId = options.sessionId || null;
+    this.conversationId = options.conversationId || null;
     this.pushToTalkActive = false;
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
@@ -463,7 +463,7 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   /**
-   * Connects to the Layercode agent and starts the audio session
+   * Connects to the Layercode agent and starts the audio conversation
    * @async
    * @returns {Promise<void>}
    */
@@ -474,15 +474,15 @@ class LayercodeClient implements ILayercodeClient {
       // Reset turn tracking for clean start
       this._resetTurnTracking();
 
-      // Get session key from server
+      // Get conversation key from server
       let authorizeSessionRequestBody = {
         agent_id: this.options.agentId,
         metadata: this.options.metadata,
         sdk_version: SDK_VERSION,
-      } as { agent_id: string; metadata: Record<string, any>; sdk_version: string; session_id?: string };
-      // If we're reconnecting to a previous session, we need to include the session_id in the request. Otherwise we don't send session_id, and a new session will be created and the session_id will be returned in the response.
-      if (this.options.sessionId) {
-        authorizeSessionRequestBody.session_id = this.options.sessionId;
+      } as { agent_id: string; metadata: Record<string, any>; sdk_version: string; conversation_id?: string };
+      // If we're reconnecting to a previous conversation, we need to include the conversation_id in the request. Otherwise we don't send conversation_id, and a new conversation will be created and the conversation_id will be returned in the response.
+      if (this.options.conversationId) {
+        authorizeSessionRequestBody.conversation_id = this.options.conversationId;
       }
       const authorizeSessionResponse = await fetch(this.options.authorizeSessionEndpoint, {
         method: 'POST',
@@ -492,10 +492,10 @@ class LayercodeClient implements ILayercodeClient {
         body: JSON.stringify(authorizeSessionRequestBody),
       });
       if (!authorizeSessionResponse.ok) {
-        throw new Error(`Failed to authorize session: ${authorizeSessionResponse.statusText}`);
+        throw new Error(`Failed to authorize conversation: ${authorizeSessionResponse.statusText}`);
       }
       const authorizeSessionResponseBody = await authorizeSessionResponse.json();
-      this.sessionId = authorizeSessionResponseBody.session_id; // Save the session_id for use in future reconnects
+      this.conversationId = authorizeSessionResponseBody.conversation_id; // Save the conversation_id for use in future reconnects
 
       // Connect WebSocket
       this.ws = new WebSocket(
@@ -523,7 +523,7 @@ class LayercodeClient implements ILayercodeClient {
       this.ws.onopen = () => {
         console.log('WebSocket connection established');
         this._setStatus('connected');
-        this.options.onConnect({ sessionId: this.sessionId });
+        this.options.onConnect({ conversationId: this.conversationId });
 
         // Attempt to send ready message if recorder already started
         this._sendReadyIfNeeded();
