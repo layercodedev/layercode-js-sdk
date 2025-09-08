@@ -63,7 +63,7 @@ export interface ClientTriggerResponseAudioInterruptedMessage extends BaseLayerc
 
 // Layercode Server WebSocket Messages → Client Browser WebSocket Messages
 export interface ServerTurnMessage extends BaseLayercodeMessage {
-  type: 'turn.start' | 'turn.end';
+  type: 'turn.start';
   role: 'user' | 'assistant'; // Note assistant role events are not currently implemented
   // turn_id: string; // TODO refactor our agents to allow turn_id to be included here
 }
