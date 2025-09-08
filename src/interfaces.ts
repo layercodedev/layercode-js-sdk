@@ -90,7 +90,7 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
 
 export interface ServerResponseUserTranscript extends BaseLayercodeMessage {
   type: 'user.transcript';
-  content: any;
+  content: any; // {'partial': 'text from is_final', 'final': 'accumulated is_final msgs sent as final transcript to webhook'};
   turn_id: string;
 }
 // // Webhook Response SSE Messages → Layercode Server
