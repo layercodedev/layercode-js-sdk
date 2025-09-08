@@ -333,6 +333,7 @@ class LayercodeClient implements ILayercodeClient {
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
 
+          // TODO: once we've added turn_id to the turn.start msgs sent from teh server, we should move this currentTurnId switching logic to the turn.start msg case. Note, setting the currentTurnId to the turnId must happen after _clientInterruptAssistantReplay is called, because that requires the old turnId to send along with the interruption event. We can then remove the currentTurnId setting logic from the response.audio and response.text cases.
           // Set current turn ID from first audio message, or update if different turn
           if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
             console.log(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
