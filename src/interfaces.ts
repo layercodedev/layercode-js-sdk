@@ -13,7 +13,8 @@ export type LayercodeMessageType =
   | 'turn.end' // Not currently implemented
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
-  | 'response.data'; // Webhook event forwarded by server to client
+  | 'response.data' // Webhook event forwarded by server to client
+  | 'user.transcript'; // Partial and/or final user transcript text as it's transcribed
 
 // // Webhook → Server SSE
 // | 'response.tts'
@@ -87,6 +88,11 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
   turn_id: string;
 }
 
+export interface ServerResponseUserTranscript extends BaseLayercodeMessage {
+  type: 'user.transcript';
+  content: any;
+  turn_id: string;
+}
 // // Webhook Response SSE Messages → Layercode Server
 // export interface WebhookResponseTTSMessage extends BaseLayercodeMessage {
 //   type: 'response.tts';
@@ -108,7 +114,7 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
 // Create a discriminated union to differentiate between webhook and server messages
 // export type WebhookMessage = WebhookResponseTTSMessage | WebhookResponseDataMessage | ResponseEndMessage;
 
-export type ServerMessage = ServerTurnMessage | ServerResponseAudioMessage | ServerResponseTextMessage | ServerResponseDataMessage;
+export type ServerMessage = ServerTurnMessage | ServerResponseAudioMessage | ServerResponseTextMessage | ServerResponseDataMessage | ServerResponseUserTranscript;
 
 export type ClientMessage =
   | ClientAudioMessage

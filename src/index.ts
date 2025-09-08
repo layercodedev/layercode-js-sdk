@@ -76,6 +76,8 @@ interface LayercodeClientOptions {
   onDeviceSwitched?: (deviceId: string) => void;
   /** Callback for data messages */
   onDataMessage?: (message: any) => void;
+  /** Callback for other messages (excluding audio msgs) */
+  onMessage?: (message: any) => void;
   /** Callback for user audio amplitude changes */
   onUserAmplitudeChange?: (amplitude: number) => void;
   /** Callback for agent audio amplitude changes */
@@ -130,6 +132,7 @@ class LayercodeClient implements ILayercodeClient {
       onError: options.onError || (() => {}),
       onDeviceSwitched: options.onDeviceSwitched || (() => {}),
       onDataMessage: options.onDataMessage || (() => {}),
+      onMessage: options.onMessage || (() => {}),
       onUserAmplitudeChange: options.onUserAmplitudeChange || (() => {}),
       onAgentAmplitudeChange: options.onAgentAmplitudeChange || (() => {}),
       onStatusChange: options.onStatusChange || (() => {}),
@@ -193,6 +196,10 @@ class LayercodeClient implements ILayercodeClient {
           type: 'vad_events',
           event: 'vad_start',
         } as ClientVadEventsMessage);
+        this.options.onMessage({
+          type: 'vad_events',
+          event: 'vad_start',
+        });
       },
       onSpeechEnd: () => {
         console.log('onSpeechEnd: sending vad_end');
@@ -203,6 +210,10 @@ class LayercodeClient implements ILayercodeClient {
           type: 'vad_events',
           event: 'vad_end',
         } as ClientVadEventsMessage);
+        this.options.onMessage({
+          type: 'vad_events',
+          event: 'vad_end',
+        });
       },
     };
 
@@ -327,6 +338,7 @@ class LayercodeClient implements ILayercodeClient {
             console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
             await this._clientInterruptAssistantReplay();
           }
+          this.options.onMessage(message);
           break;
 
         case 'response.audio':
@@ -344,21 +356,27 @@ class LayercodeClient implements ILayercodeClient {
           }
           break;
 
-        case 'response.text': {
+        case 'response.text':
           // Set turn ID from first text message if not set
           if (!this.currentTurnId) {
             this.currentTurnId = message.turn_id;
             console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
           }
+          this.options.onMessage(message);
           break;
-        }
+
         case 'response.data':
           console.log('received response.data', message);
           this.options.onDataMessage(message);
           break;
+
+        case 'user.transcript':
+          console.log('received user.transcript', message);
+          this.options.onMessage(message);
+          break;
+
         default:
           console.warn('Unknown message type received:', message);
-          break;
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error);
