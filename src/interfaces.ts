@@ -9,8 +9,7 @@ export type LayercodeMessageType =
   | 'client.ready'
 
   // Server → Client WebSocket
-  | 'turn.start' // Not currently implemented
-  | 'turn.end' // Not currently implemented
+  | 'turn.start'
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
   | 'response.data' // Webhook event forwarded by server to client
