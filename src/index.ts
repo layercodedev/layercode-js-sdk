@@ -189,7 +189,7 @@ class LayercodeClient implements ILayercodeClient {
     const vadOptions: any = {
       stream: this.wavRecorder.getStream() || undefined,
       onSpeechStart: () => {
-        console.log('onSpeechStart: sending vad_start');
+        console.debug('onSpeechStart: sending vad_start');
         this.userIsSpeaking = true;
         this.options.onUserIsSpeakingChange(true);
         this._wsSend({
@@ -202,7 +202,7 @@ class LayercodeClient implements ILayercodeClient {
         });
       },
       onSpeechEnd: () => {
-        console.log('onSpeechEnd: sending vad_end');
+        console.debug('onSpeechEnd: sending vad_end');
         this.userIsSpeaking = false;
         this.options.onUserIsSpeakingChange(false);
         this.audioBuffer = []; // Clear buffer on speech end
@@ -269,7 +269,7 @@ class LayercodeClient implements ILayercodeClient {
    * Handles when agent audio finishes playing
    */
   private _clientResponseAudioReplayFinished(): void {
-    console.log('clientResponseAudioReplayFinished');
+    console.debug('clientResponseAudioReplayFinished');
     this._wsSend({
       type: 'trigger.response.audio.replay_finished',
       reason: 'completed',
@@ -322,20 +322,18 @@ class LayercodeClient implements ILayercodeClient {
     try {
       const message: ServerMessage = JSON.parse(event.data);
       if (message.type !== 'response.audio') {
-        console.log('received ws msg:', message);
+        console.log('msg:', message);
       }
 
       switch (message.type) {
         case 'turn.start':
           // Sent from the server to this client when a new user turn is detected
-          console.log('received turn.start from server');
-          console.log(message);
           if (message.role === 'assistant') {
             // Start tracking new assistant turn
-            console.log('Assistant turn started, will track new turn ID from audio/text');
+            console.debug('Assistant turn started, will track new turn ID from audio/text');
           } else if (message.role === 'user' && !this.pushToTalkEnabled) {
             // Interrupt any playing assistant audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
-            console.log('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
+            console.debug('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
             await this._clientInterruptAssistantReplay();
           }
           this.options.onMessage(message);
@@ -348,7 +346,7 @@ class LayercodeClient implements ILayercodeClient {
           // TODO: once we've added turn_id to the turn.start msgs sent from teh server, we should move this currentTurnId switching logic to the turn.start msg case. Note, setting the currentTurnId to the turnId must happen after _clientInterruptAssistantReplay is called, because that requires the old turnId to send along with the interruption event. We can then remove the currentTurnId setting logic from the response.audio and response.text cases.
           // Set current turn ID from first audio message, or update if different turn
           if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
-            console.log(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
+            console.debug(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
             this.currentTurnId = message.turn_id;
 
             // Clean up interrupted tracks, keeping only the current turn
@@ -360,18 +358,17 @@ class LayercodeClient implements ILayercodeClient {
           // Set turn ID from first text message if not set
           if (!this.currentTurnId) {
             this.currentTurnId = message.turn_id;
-            console.log(`Setting current turn ID to: ${message.turn_id} from text message`);
+            console.debug(`Setting current turn ID to: ${message.turn_id} from text message`);
           }
           this.options.onMessage(message);
           break;
 
         case 'response.data':
-          console.log('received response.data', message);
           this.options.onDataMessage(message);
           break;
 
         case 'user.transcript':
-          console.log('received user.transcript', message);
+        case 'user.transcript.delta':
           this.options.onMessage(message);
           break;
 
@@ -409,7 +406,7 @@ class LayercodeClient implements ILayercodeClient {
       if (sendAudio) {
         // If we have buffered audio and we're gating, send it first
         if (shouldGateAudio && this.audioBuffer.length > 0) {
-          console.log(`Sending ${this.audioBuffer.length} buffered audio chunks`);
+          console.debug(`Sending ${this.audioBuffer.length} buffered audio chunks`);
           for (const bufferedAudio of this.audioBuffer) {
             this._wsSend({
               type: 'client.audio',
@@ -441,7 +438,7 @@ class LayercodeClient implements ILayercodeClient {
 
   private _wsSend(message: ClientMessage): void {
     if (message.type !== 'client.audio') {
-      console.log('sent ws msg:', message);
+      console.debug('sent_msg:', message);
     }
     const messageString = JSON.stringify(message);
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -523,7 +520,7 @@ class LayercodeClient implements ILayercodeClient {
         })}`
       );
       const config: AgentConfig = authorizeSessionResponseBody.config;
-      console.log('config', config);
+      console.log('AgentConfig', config);
 
       // Store VAD configuration
       this.vadConfig = config.vad || null;
@@ -576,7 +573,7 @@ class LayercodeClient implements ILayercodeClient {
 
   private _resetTurnTracking(): void {
     this.currentTurnId = null;
-    console.log('Reset turn tracking state');
+    console.debug('Reset turn tracking state');
   }
 
   async disconnect(): Promise<void> {
@@ -625,11 +622,11 @@ class LayercodeClient implements ILayercodeClient {
       // Reinitialize VAD with the new audio stream if VAD is enabled
       const shouldUseVAD = !this.pushToTalkEnabled && this.vadConfig?.enabled !== false;
       if (shouldUseVAD) {
-        console.log('Reinitializing VAD with new audio stream');
+        console.debug('Reinitializing VAD with new audio stream');
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      console.log(`Successfully switched to input device: ${deviceId}`);
+      console.debug(`Successfully switched to input device: ${deviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
       throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
@@ -641,7 +638,7 @@ class LayercodeClient implements ILayercodeClient {
    */
   private async _restartAudioRecording(): Promise<void> {
     try {
-      console.log('Restarting audio recording after device switch...');
+      console.debug('Restarting audio recording after device switch...');
       try {
         await this.wavRecorder.end();
       } catch {
@@ -655,7 +652,7 @@ class LayercodeClient implements ILayercodeClient {
       // Re-setup amplitude monitoring with the new stream
       this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
 
-      console.log('Audio recording restart completed successfully');
+      console.debug('Audio recording restart completed successfully');
     } catch (error) {
       console.error('Error restarting audio recording after device switch:', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
@@ -687,7 +684,7 @@ class LayercodeClient implements ILayercodeClient {
       try {
         const currentDeviceExists = devices.some((device: any) => device.deviceId === this.deviceId);
         if (!currentDeviceExists) {
-          console.log('Current device disconnected, switching to next available device');
+          console.debug('Current device disconnected, switching to next available device');
           try {
             const nextDevice = devices.find((d: any) => d.default);
             if (nextDevice) {
