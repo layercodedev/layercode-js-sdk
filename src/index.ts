@@ -322,7 +322,7 @@ class LayercodeClient implements ILayercodeClient {
     try {
       const message: ServerMessage = JSON.parse(event.data);
       if (message.type !== 'response.audio') {
-        console.log('msg:', message);
+        console.debug('msg:', message);
       }
 
       switch (message.type) {
