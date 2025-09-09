@@ -9,7 +9,6 @@ import {
   ClientAudioMessage,
   ClientTriggerTurnMessage,
   ClientTriggerResponseAudioReplayFinishedMessage,
-  ClientTriggerResponseAudioInterruptedMessage,
   ClientVadEventsMessage,
 } from './interfaces.js';
 
@@ -727,8 +726,6 @@ class LayercodeClient implements ILayercodeClient {
       this.options.onMuteStateChange(false);
     }
   }
-
-
 }
 
 export default LayercodeClient;
