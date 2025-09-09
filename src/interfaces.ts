@@ -4,16 +4,16 @@ export type LayercodeMessageType =
   | 'trigger.turn.start'
   | 'trigger.turn.end'
   | 'trigger.response.audio.replay_finished'
-  | 'trigger.response.audio.interrupted'
   | 'vad_events'
   | 'client.ready'
 
   // Server → Client WebSocket
-  | 'turn.start' // Not currently implemented
-  | 'turn.end' // Not currently implemented
+  | 'turn.start'
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
-  | 'response.data'; // Webhook event forwarded by server to client
+  | 'response.data' // Webhook event forwarded by server to client
+  | 'user.transcript.delta' // Partial user transcript text as it's transcribed
+  | 'user.transcript'; // Final user transcript text at end of user turn
 
 // // Webhook → Server SSE
 // | 'response.tts'
@@ -52,20 +52,11 @@ export interface ClientTriggerResponseAudioReplayFinishedMessage extends BaseLay
   last_delta_id_played?: string;
 }
 
-export interface ClientTriggerResponseAudioInterruptedMessage extends BaseLayercodeMessage {
-  type: 'trigger.response.audio.interrupted';
-  playback_offset?: number;
-  interruption_context?: {
-    turn_id: string;
-    playback_offset_ms: number;
-  };
-}
-
 // Layercode Server WebSocket Messages → Client Browser WebSocket Messages
 export interface ServerTurnMessage extends BaseLayercodeMessage {
-  type: 'turn.start' | 'turn.end';
+  type: 'turn.start';
   role: 'user' | 'assistant'; // Note assistant role events are not currently implemented
-  // turn_id: string; // TODO refactor our pipeines to allow turn_id to be included here
+  // turn_id: string; // TODO refactor our agents to allow turn_id to be included here
 }
 
 export interface ServerResponseAudioMessage extends BaseLayercodeMessage {
@@ -87,6 +78,17 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
   turn_id: string;
 }
 
+export interface ServerResponseUserTranscriptDelta extends BaseLayercodeMessage {
+  type: 'user.transcript.delta';
+  content: string;
+  turn_id: string;
+}
+
+export interface ServerResponseUserTranscript extends BaseLayercodeMessage {
+  type: 'user.transcript';
+  content: string;
+  turn_id: string;
+}
 // // Webhook Response SSE Messages → Layercode Server
 // export interface WebhookResponseTTSMessage extends BaseLayercodeMessage {
 //   type: 'response.tts';
@@ -108,15 +110,15 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
 // Create a discriminated union to differentiate between webhook and server messages
 // export type WebhookMessage = WebhookResponseTTSMessage | WebhookResponseDataMessage | ResponseEndMessage;
 
-export type ServerMessage = ServerTurnMessage | ServerResponseAudioMessage | ServerResponseTextMessage | ServerResponseDataMessage;
+export type ServerMessage =
+  | ServerTurnMessage
+  | ServerResponseAudioMessage
+  | ServerResponseTextMessage
+  | ServerResponseDataMessage
+  | ServerResponseUserTranscriptDelta
+  | ServerResponseUserTranscript;
 
-export type ClientMessage =
-  | ClientAudioMessage
-  | ClientTriggerTurnMessage
-  | ClientTriggerResponseAudioReplayFinishedMessage
-  | ClientTriggerResponseAudioInterruptedMessage
-  | ClientVadEventsMessage
-  | ClientReadyMessage;
+export type ClientMessage = ClientAudioMessage | ClientTriggerTurnMessage | ClientTriggerResponseAudioReplayFinishedMessage | ClientVadEventsMessage | ClientReadyMessage;
 
 // Union type for all possible messages
 export type LayercodeMessage = ClientMessage | ServerMessage;
