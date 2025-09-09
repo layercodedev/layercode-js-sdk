@@ -277,26 +277,7 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private async _clientInterruptAssistantReplay(): Promise<void> {
-    const offsetData = await this.wavPlayer.interrupt();
-
-    if (offsetData && this.currentTurnId) {
-      let offsetMs = offsetData.currentTime * 1000;
-
-      // Send interruption event with accurate playback offset in milliseconds
-      this._wsSend({
-        type: 'trigger.response.audio.interrupted',
-        playback_offset: offsetMs,
-        interruption_context: {
-          turn_id: this.currentTurnId,
-          playback_offset_ms: offsetMs,
-        },
-      } as ClientTriggerResponseAudioInterruptedMessage);
-    } else {
-      console.warn('Interruption requested but missing required data:', {
-        hasOffsetData: !!offsetData,
-        hasTurnId: !!this.currentTurnId,
-      });
-    }
+    await this.wavPlayer.interrupt();
   }
 
   async triggerUserTurnStarted(): Promise<void> {
@@ -343,7 +324,7 @@ class LayercodeClient implements ILayercodeClient {
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
 
-          // TODO: once we've added turn_id to the turn.start msgs sent from teh server, we should move this currentTurnId switching logic to the turn.start msg case. Note, setting the currentTurnId to the turnId must happen after _clientInterruptAssistantReplay is called, because that requires the old turnId to send along with the interruption event. We can then remove the currentTurnId setting logic from the response.audio and response.text cases.
+          // TODO: once we've added turn_id to the turn.start msgs sent from teh server, we should move this currentTurnId switching logic to the turn.start msg case. We can then remove the currentTurnId setting logic from the response.audio and response.text cases.
           // Set current turn ID from first audio message, or update if different turn
           if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
             console.debug(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);

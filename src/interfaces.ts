@@ -4,7 +4,6 @@ export type LayercodeMessageType =
   | 'trigger.turn.start'
   | 'trigger.turn.end'
   | 'trigger.response.audio.replay_finished'
-  | 'trigger.response.audio.interrupted'
   | 'vad_events'
   | 'client.ready'
 
@@ -51,15 +50,6 @@ export interface ClientTriggerResponseAudioReplayFinishedMessage extends BaseLay
   type: 'trigger.response.audio.replay_finished';
   reason: 'completed';
   last_delta_id_played?: string;
-}
-
-export interface ClientTriggerResponseAudioInterruptedMessage extends BaseLayercodeMessage {
-  type: 'trigger.response.audio.interrupted';
-  playback_offset?: number;
-  interruption_context?: {
-    turn_id: string;
-    playback_offset_ms: number;
-  };
 }
 
 // Layercode Server WebSocket Messages → Client Browser WebSocket Messages
@@ -128,13 +118,7 @@ export type ServerMessage =
   | ServerResponseUserTranscriptDelta
   | ServerResponseUserTranscript;
 
-export type ClientMessage =
-  | ClientAudioMessage
-  | ClientTriggerTurnMessage
-  | ClientTriggerResponseAudioReplayFinishedMessage
-  | ClientTriggerResponseAudioInterruptedMessage
-  | ClientVadEventsMessage
-  | ClientReadyMessage;
+export type ClientMessage = ClientAudioMessage | ClientTriggerTurnMessage | ClientTriggerResponseAudioReplayFinishedMessage | ClientVadEventsMessage | ClientReadyMessage;
 
 // Union type for all possible messages
 export type LayercodeMessage = ClientMessage | ServerMessage;
