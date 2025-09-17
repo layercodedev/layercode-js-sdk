@@ -1,4 +1,5 @@
 /* eslint-env browser */
+import { env as ortEnv } from 'onnxruntime-web';
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
 // @ts-ignore - VAD package does not provide TypeScript types
 import { MicVAD } from '@ricky0123/vad-web';
@@ -34,6 +35,52 @@ interface AgentConfig {
 
 // SDK version - updated when publishing
 const SDK_VERSION = '2.0.2';
+
+const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
+try {
+  if (
+    typeof ortEnv !== 'undefined' &&
+    (!ortEnv.logLevel || ortEnv.logLevel === 'warning' || ortEnv.logLevel === 'info' || ortEnv.logLevel === 'verbose')
+  ) {
+    ortEnv.logLevel = ORT_WARNING_MUTE_LEVEL;
+  }
+  try {
+    const g: any = globalThis as any;
+    if (g?.ort?.env && (!g.ort.env.logLevel || g.ort.env.logLevel !== 'error')) {
+      g.ort.env.logLevel = ORT_WARNING_MUTE_LEVEL;
+    }
+  } catch {}
+} catch {
+  // Ignore failures when muting ONNX runtime logging; fallback to defaults
+}
+
+// Filter noisy ORT warnings emitted via nested bundled copies of onnxruntime-web.
+(() => {
+  try {
+    const ORT_WARN_RE = /\[W:onnxruntime:/;
+    const ORT_KNOWN_NOISE = [
+      'Removing initializer',
+    ];
+    const wrap = <T extends (...args: any[]) => any>(fn: T): T => {
+      const bound = fn.bind(console);
+      return ((...args: any[]) => {
+        try {
+          const first = args[0];
+          if (typeof first === 'string') {
+            if (ORT_WARN_RE.test(first) || ORT_KNOWN_NOISE.some((s) => first.includes(s))) {
+              return;
+            }
+          }
+        } catch {}
+        return bound(...args);
+      }) as T;
+    };
+    console.warn = wrap(console.warn);
+    console.log = wrap(console.log);
+  } catch {
+    // Non-fatal; leave console as-is
+  }
+})();
 
 /**
  * Interface for LayercodeClient public methods
@@ -113,6 +160,9 @@ class LayercodeClient implements ILayercodeClient {
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
   private vadConfig: AgentConfig['vad'] | null;
   private deviceId: string | null = null;
+  private activeDeviceId: string | null;
+  private useSystemDefaultDevice: boolean;
+  private lastReportedDeviceId: string | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -167,6 +217,9 @@ class LayercodeClient implements ILayercodeClient {
     this.currentTurnId = null;
     this.audioBuffer = [];
     this.vadConfig = null;
+    this.activeDeviceId = null;
+    this.useSystemDefaultDevice = false;
+    this.lastReportedDeviceId = null;
     this.isMuted = false;
     // this.audioPauseTime = null;
 
@@ -569,6 +622,13 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   async disconnect(): Promise<void> {
+    this.deviceId = null;
+    this.activeDeviceId = null;
+    this.useSystemDefaultDevice = false;
+    this.lastReportedDeviceId = null;
+    this.recorderStarted = false;
+    this.readySent = false;
+
     // Clean up VAD if it exists
     if (this.vad) {
       this.vad.pause();
@@ -606,7 +666,9 @@ class LayercodeClient implements ILayercodeClient {
    */
   async setInputDevice(deviceId: string): Promise<void> {
     try {
-      this.deviceId = deviceId;
+      const normalizedDeviceId = !deviceId || deviceId === 'default' ? null : deviceId;
+      this.useSystemDefaultDevice = normalizedDeviceId === null;
+      this.deviceId = normalizedDeviceId;
 
       // Restart recording with the new device
       await this._restartAudioRecording();
@@ -618,7 +680,11 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      console.debug(`Successfully switched to input device: ${deviceId}`);
+      const reportedDeviceId =
+        this.lastReportedDeviceId ??
+        this.activeDeviceId ??
+        (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
+      console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
       throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
@@ -638,11 +704,32 @@ class LayercodeClient implements ILayercodeClient {
       }
 
       // Start with new device
-      await this.wavRecorder.begin(this.deviceId || undefined);
+      const targetDeviceId = this.useSystemDefaultDevice ? undefined : this.deviceId || undefined;
+      await this.wavRecorder.begin(targetDeviceId);
       await this.wavRecorder.record(this._handleDataAvailable, 1638);
 
       // Re-setup amplitude monitoring with the new stream
       this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+
+      const previousReportedDeviceId = this.lastReportedDeviceId;
+      const stream = this.wavRecorder.getStream();
+      const activeTrack = stream?.getAudioTracks()[0] || null;
+      const trackSettings = activeTrack && typeof activeTrack.getSettings === 'function' ? activeTrack.getSettings() : null;
+      const trackDeviceId = trackSettings && typeof trackSettings.deviceId === 'string' ? trackSettings.deviceId : null;
+      this.activeDeviceId = trackDeviceId ?? (this.useSystemDefaultDevice ? null : this.deviceId);
+
+      if (!this.recorderStarted) {
+        this.recorderStarted = true;
+        this._sendReadyIfNeeded();
+      }
+
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
+      if (reportedDeviceId !== previousReportedDeviceId) {
+        this.lastReportedDeviceId = reportedDeviceId;
+        if (this.options.onDeviceSwitched) {
+          this.options.onDeviceSwitched(reportedDeviceId);
+        }
+      }
 
       console.debug('Audio recording restart completed successfully');
     } catch (error) {
@@ -674,28 +761,38 @@ class LayercodeClient implements ILayercodeClient {
   private _setupDeviceChangeListener(): void {
     this.wavRecorder.listenForDeviceChange(async (devices: any[]) => {
       try {
-        const currentDeviceExists = devices.some((device: any) => device.deviceId === this.deviceId);
-        if (!currentDeviceExists) {
-          console.debug('Current device disconnected, switching to next available device');
-          try {
-            const nextDevice = devices.find((d: any) => d.default);
-            if (nextDevice) {
-              await this.setInputDevice(nextDevice.deviceId);
-              // Mark recorder as started and attempt to notify server
-              if (!this.recorderStarted) {
-                this.recorderStarted = true;
-                this._sendReadyIfNeeded();
-              }
-              // Notify about device switch
-              if (this.options.onDeviceSwitched) {
-                this.options.onDeviceSwitched(nextDevice.deviceId);
-              }
-            } else {
-              console.warn('No alternative audio device found');
+        const defaultDevice = devices.find((device: any) => device.default);
+        const usingDefaultDevice = this.useSystemDefaultDevice;
+
+        let shouldSwitch = !this.recorderStarted;
+
+        if (!shouldSwitch) {
+          if (usingDefaultDevice) {
+            if (!defaultDevice) {
+              shouldSwitch = true;
+            } else if (
+              this.activeDeviceId &&
+              defaultDevice.deviceId !== 'default' &&
+              defaultDevice.deviceId !== this.activeDeviceId
+            ) {
+              shouldSwitch = true;
             }
-          } catch (error) {
-            console.error('Error switching to next device:', error);
-            throw error;
+          } else {
+            const matchesRequestedDevice = devices.some(
+              (device: any) => device.deviceId === this.deviceId || device.deviceId === this.activeDeviceId
+            );
+            shouldSwitch = !matchesRequestedDevice;
+          }
+        }
+
+        if (shouldSwitch) {
+          console.debug('Selecting fallback audio input device');
+          const fallbackDevice = defaultDevice || devices[0];
+          if (fallbackDevice) {
+            const fallbackId = fallbackDevice.default ? 'default' : fallbackDevice.deviceId;
+            await this.setInputDevice(fallbackId);
+          } else {
+            console.warn('No alternative audio device found');
           }
         }
       } catch (error) {
