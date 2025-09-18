@@ -163,6 +163,7 @@ class LayercodeClient implements ILayercodeClient {
   private activeDeviceId: string | null;
   private useSystemDefaultDevice: boolean;
   private lastReportedDeviceId: string | null;
+  private lastKnownSystemDefaultDeviceKey: string | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -220,6 +221,7 @@ class LayercodeClient implements ILayercodeClient {
     this.activeDeviceId = null;
     this.useSystemDefaultDevice = false;
     this.lastReportedDeviceId = null;
+    this.lastKnownSystemDefaultDeviceKey = null;
     this.isMuted = false;
     // this.audioPauseTime = null;
 
@@ -626,6 +628,7 @@ class LayercodeClient implements ILayercodeClient {
     this.activeDeviceId = null;
     this.useSystemDefaultDevice = false;
     this.lastReportedDeviceId = null;
+    this.lastKnownSystemDefaultDeviceKey = null;
     this.recorderStarted = false;
     this.readySent = false;
 
@@ -763,6 +766,8 @@ class LayercodeClient implements ILayercodeClient {
       try {
         const defaultDevice = devices.find((device: any) => device.default);
         const usingDefaultDevice = this.useSystemDefaultDevice;
+        const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
+        const currentDefaultDeviceKey = this._getDeviceComparisonKey(defaultDevice);
 
         let shouldSwitch = !this.recorderStarted;
 
@@ -776,6 +781,11 @@ class LayercodeClient implements ILayercodeClient {
               defaultDevice.deviceId !== this.activeDeviceId
             ) {
               shouldSwitch = true;
+            } else if (
+              (previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
+              (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted)
+            ) {
+              shouldSwitch = true;
             }
           } else {
             const matchesRequestedDevice = devices.some(
@@ -784,6 +794,8 @@ class LayercodeClient implements ILayercodeClient {
             shouldSwitch = !matchesRequestedDevice;
           }
         }
+
+        this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
 
         if (shouldSwitch) {
           console.debug('Selecting fallback audio input device');
@@ -799,6 +811,25 @@ class LayercodeClient implements ILayercodeClient {
         this.options.onError(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  private _getDeviceComparisonKey(device: any): string | null {
+    if (!device || typeof device !== 'object') {
+      return null;
+    }
+    const deviceId = typeof device.deviceId === 'string' ? device.deviceId : '';
+    if (deviceId && deviceId !== 'default') {
+      return deviceId;
+    }
+    const groupId = typeof device.groupId === 'string' ? device.groupId : '';
+    if (groupId) {
+      return groupId;
+    }
+    const label = typeof device.label === 'string' ? device.label : '';
+    if (label) {
+      return label;
+    }
+    return null;
   }
 
   /**
