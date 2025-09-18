@@ -782,9 +782,8 @@ class LayercodeClient implements ILayercodeClient {
             ) {
               shouldSwitch = true;
             } else if (
-              !this.activeDeviceId &&
-              ((previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
-                (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted))
+              (previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
+              (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted)
             ) {
               shouldSwitch = true;
             }
