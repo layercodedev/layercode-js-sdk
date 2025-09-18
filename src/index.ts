@@ -1,5 +1,5 @@
 /* eslint-env browser */
-import { env as ortEnv } from 'onnxruntime-web';
+// import { env as ortEnv } from 'onnxruntime-web';
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
 // @ts-ignore - VAD package does not provide TypeScript types
 import { MicVAD } from '@ricky0123/vad-web';
@@ -37,53 +37,53 @@ const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
-const SDK_VERSION = '2.0.2';
+const SDK_VERSION = '2.1.2';
 
-const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
-try {
-  if (
-    typeof ortEnv !== 'undefined' &&
-    (!ortEnv.logLevel || ortEnv.logLevel === 'warning' || ortEnv.logLevel === 'info' || ortEnv.logLevel === 'verbose')
-  ) {
-    ortEnv.logLevel = ORT_WARNING_MUTE_LEVEL;
-  }
-  try {
-    const g: any = globalThis as any;
-    if (g?.ort?.env && (!g.ort.env.logLevel || g.ort.env.logLevel !== 'error')) {
-      g.ort.env.logLevel = ORT_WARNING_MUTE_LEVEL;
-    }
-  } catch {}
-} catch {
-  // Ignore failures when muting ONNX runtime logging; fallback to defaults
-}
+// const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
+// try {
+//   if (
+//     typeof ortEnv !== 'undefined' &&
+//     (!ortEnv.logLevel || ortEnv.logLevel === 'warning' || ortEnv.logLevel === 'info' || ortEnv.logLevel === 'verbose')
+//   ) {
+//     ortEnv.logLevel = ORT_WARNING_MUTE_LEVEL;
+//   }
+//   try {
+//     const g: any = globalThis as any;
+//     if (g?.ort?.env && (!g.ort.env.logLevel || g.ort.env.logLevel !== 'error')) {
+//       g.ort.env.logLevel = ORT_WARNING_MUTE_LEVEL;
+//     }
+//   } catch {}
+// } catch {
+//   // Ignore failures when muting ONNX runtime logging; fallback to defaults
+// }
 
-// Filter noisy ORT warnings emitted via nested bundled copies of onnxruntime-web.
-(() => {
-  try {
-    const ORT_WARN_RE = /\[W:onnxruntime:/;
-    const ORT_KNOWN_NOISE = [
-      'Removing initializer',
-    ];
-    const wrap = <T extends (...args: any[]) => any>(fn: T): T => {
-      const bound = fn.bind(console);
-      return ((...args: any[]) => {
-        try {
-          const first = args[0];
-          if (typeof first === 'string') {
-            if (ORT_WARN_RE.test(first) || ORT_KNOWN_NOISE.some((s) => first.includes(s))) {
-              return;
-            }
-          }
-        } catch {}
-        return bound(...args);
-      }) as T;
-    };
-    console.warn = wrap(console.warn);
-    console.log = wrap(console.log);
-  } catch {
-    // Non-fatal; leave console as-is
-  }
-})();
+// // Filter noisy ORT warnings emitted via nested bundled copies of onnxruntime-web.
+// (() => {
+//   try {
+//     const ORT_WARN_RE = /\[W:onnxruntime:/;
+//     const ORT_KNOWN_NOISE = [
+//       'Removing initializer',
+//     ];
+//     const wrap = <T extends (...args: any[]) => any>(fn: T): T => {
+//       const bound = fn.bind(console);
+//       return ((...args: any[]) => {
+//         try {
+//           const first = args[0];
+//           if (typeof first === 'string') {
+//             if (ORT_WARN_RE.test(first) || ORT_KNOWN_NOISE.some((s) => first.includes(s))) {
+//               return;
+//             }
+//           }
+//         } catch {}
+//         return bound(...args);
+//       }) as T;
+//     };
+//     console.warn = wrap(console.warn);
+//     console.log = wrap(console.log);
+//   } catch {
+//     // Non-fatal; leave console as-is
+//   }
+// })();
 
 /**
  * Interface for LayercodeClient public methods
@@ -237,7 +237,6 @@ class LayercodeClient implements ILayercodeClient {
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
     this._handleDataAvailable = this._handleDataAvailable.bind(this);
-
   }
 
   private _initializeVAD(): void {
@@ -630,11 +629,10 @@ class LayercodeClient implements ILayercodeClient {
       this.ws.onclose = () => {
         console.log('WebSocket connection closed');
         this.ws = null;
-        this._performDisconnectCleanup()
-          .catch((error) => {
-            console.error('Error during disconnect cleanup:', error);
-            this.options.onError(error instanceof Error ? error : new Error(String(error)));
-          });
+        this._performDisconnectCleanup().catch((error) => {
+          console.error('Error during disconnect cleanup:', error);
+          this.options.onError(error instanceof Error ? error : new Error(String(error)));
+        });
       };
       this.ws.onerror = (error: Event) => {
         console.error('WebSocket error:', error);
@@ -708,10 +706,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId =
-        this.lastReportedDeviceId ??
-        this.activeDeviceId ??
-        (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -751,7 +746,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
@@ -801,11 +796,7 @@ class LayercodeClient implements ILayercodeClient {
             if (usingDefaultDevice) {
               if (!defaultDevice) {
                 shouldSwitch = true;
-              } else if (
-                this.activeDeviceId &&
-                defaultDevice.deviceId !== 'default' &&
-                defaultDevice.deviceId !== this.activeDeviceId
-              ) {
+              } else if (this.activeDeviceId && defaultDevice.deviceId !== 'default' && defaultDevice.deviceId !== this.activeDeviceId) {
                 shouldSwitch = true;
               } else if (
                 (previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
@@ -814,9 +805,7 @@ class LayercodeClient implements ILayercodeClient {
                 shouldSwitch = true;
               }
             } else {
-              const matchesRequestedDevice = devices.some(
-                (device: any) => device.deviceId === this.deviceId || device.deviceId === this.activeDeviceId
-              );
+              const matchesRequestedDevice = devices.some((device: any) => device.deviceId === this.deviceId || device.deviceId === this.activeDeviceId);
               shouldSwitch = !matchesRequestedDevice;
             }
           }
