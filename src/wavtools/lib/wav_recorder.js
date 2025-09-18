@@ -51,6 +51,7 @@ export class WavRecorder {
       raw: new ArrayBuffer(0),
       mono: new ArrayBuffer(0),
     };
+    this.amplitudeMonitorRaf = void 0;
   }
 
   /**
@@ -450,12 +451,20 @@ export class WavRecorder {
    * @param {function} callback - Function to call with amplitude value
    */
   startAmplitudeMonitoring(callback) {
+    this.stopAmplitudeMonitoring();
     const monitor = () => {
       const amplitude = this.getAmplitude();
       callback(amplitude);
-      requestAnimationFrame(monitor);
+      this.amplitudeMonitorRaf = requestAnimationFrame(monitor);
     };
     monitor();
+  }
+
+  stopAmplitudeMonitoring() {
+    if (this.amplitudeMonitorRaf !== void 0) {
+      cancelAnimationFrame(this.amplitudeMonitorRaf);
+      this.amplitudeMonitorRaf = void 0;
+    }
   }
 
   /**
@@ -590,6 +599,7 @@ export class WavRecorder {
    * @returns {Promise<true>}
    */
   async quit() {
+    this.stopAmplitudeMonitoring();
     this.listenForDeviceChange(null);
     if (this.processor) {
       await this.end();

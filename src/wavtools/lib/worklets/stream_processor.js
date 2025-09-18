@@ -40,6 +40,8 @@ class StreamProcessor extends AudioWorkletProcessor {
           this.isPaused = true;
         } else if (payload.event === 'play') {
           this.isPaused = false;
+        } else if (payload.event === 'stop') {
+          this.hasInterrupted = true;
         } else {
           throw new Error(\`Unhandled event "\${payload.event}"\`);
         }

@@ -33,6 +33,9 @@ interface AgentConfig {
   };
 }
 
+const NOOP = () => {};
+const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
+
 // SDK version - updated when publishing
 const SDK_VERSION = '2.0.2';
 
@@ -86,8 +89,8 @@ try {
  * Interface for LayercodeClient public methods
  */
 interface ILayercodeClient {
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
+  connect(opts?: { conversationId?: string; newConversation?: boolean }): Promise<void>;
+  disconnect(opts?: { clearConversationId?: boolean }): Promise<void>;
   triggerUserTurnStarted(): Promise<void>;
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
@@ -164,6 +167,9 @@ class LayercodeClient implements ILayercodeClient {
   private useSystemDefaultDevice: boolean;
   private lastReportedDeviceId: string | null;
   private lastKnownSystemDefaultDeviceKey: string | null;
+  private stopPlayerAmplitude?: () => void;
+  private stopRecorderAmplitude?: () => void;
+  private deviceChangeListener: ((devices: any[]) => Promise<void>) | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -178,25 +184,25 @@ class LayercodeClient implements ILayercodeClient {
   constructor(options: LayercodeClientOptions) {
     this.options = {
       agentId: options.agentId,
-      conversationId: options.conversationId || null,
+      conversationId: options.conversationId ?? null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
-      metadata: options.metadata || {},
-      vadResumeDelay: options.vadResumeDelay || 500,
-      onConnect: options.onConnect || (() => {}),
-      onDisconnect: options.onDisconnect || (() => {}),
-      onError: options.onError || (() => {}),
-      onDeviceSwitched: options.onDeviceSwitched || (() => {}),
-      onDataMessage: options.onDataMessage || (() => {}),
-      onMessage: options.onMessage || (() => {}),
-      onUserAmplitudeChange: options.onUserAmplitudeChange || (() => {}),
-      onAgentAmplitudeChange: options.onAgentAmplitudeChange || (() => {}),
-      onStatusChange: options.onStatusChange || (() => {}),
-      onUserIsSpeakingChange: options.onUserIsSpeakingChange || (() => {}),
-      onMuteStateChange: options.onMuteStateChange || (() => {}),
+      metadata: options.metadata ?? {},
+      vadResumeDelay: options.vadResumeDelay ?? 500,
+      onConnect: options.onConnect ?? NOOP,
+      onDisconnect: options.onDisconnect ?? NOOP,
+      onError: options.onError ?? NOOP,
+      onDeviceSwitched: options.onDeviceSwitched ?? NOOP,
+      onDataMessage: options.onDataMessage ?? NOOP,
+      onMessage: options.onMessage ?? NOOP,
+      onUserAmplitudeChange: options.onUserAmplitudeChange ?? NOOP,
+      onAgentAmplitudeChange: options.onAgentAmplitudeChange ?? NOOP,
+      onStatusChange: options.onStatusChange ?? NOOP,
+      onUserIsSpeakingChange: options.onUserIsSpeakingChange ?? NOOP,
+      onMuteStateChange: options.onMuteStateChange ?? NOOP,
     };
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 2;
-    this._websocketUrl = 'wss://api.layercode.com/v1/agents/web/websocket';
+    this._websocketUrl = DEFAULT_WS_URL;
 
     this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
     this.wavPlayer = new WavStreamPlayer({
@@ -208,7 +214,7 @@ class LayercodeClient implements ILayercodeClient {
     this.status = 'disconnected';
     this.userAudioAmplitude = 0;
     this.agentAudioAmplitude = 0;
-    this.conversationId = options.conversationId || null;
+    this.conversationId = this.options.conversationId;
     this.pushToTalkActive = false;
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
@@ -223,13 +229,15 @@ class LayercodeClient implements ILayercodeClient {
     this.lastReportedDeviceId = null;
     this.lastKnownSystemDefaultDeviceKey = null;
     this.isMuted = false;
+    this.stopPlayerAmplitude = undefined;
+    this.stopRecorderAmplitude = undefined;
+    this.deviceChangeListener = null;
     // this.audioPauseTime = null;
 
     // Bind event handlers
     this._handleWebSocketMessage = this._handleWebSocketMessage.bind(this);
     this._handleDataAvailable = this._handleDataAvailable.bind(this);
 
-    this._setupDeviceChangeListener();
   }
 
   private _initializeVAD(): void {
@@ -509,20 +517,33 @@ class LayercodeClient implements ILayercodeClient {
    * @param {(amplitude: number) => void} updateInternalState - Function to update the internal amplitude state.
    */
   private _setupAmplitudeMonitoring(source: WavRecorder | WavStreamPlayer, callback: (amplitude: number) => void, updateInternalState: (amplitude: number) => void): void {
-    // Set up amplitude monitoring only if a callback is provided
-    // Check against the default no-op function defined in the constructor options
-    if (callback !== (() => {})) {
-      let updateCounter = 0;
-      source.startAmplitudeMonitoring((amplitude: number) => {
-        // Only update and call callback at the specified sample rate
-        if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
-          updateInternalState(amplitude);
+    let updateCounter = 0;
+    source.startAmplitudeMonitoring((amplitude: number) => {
+      // Only update and call callback at the specified sample rate
+      if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
+        updateInternalState(amplitude);
+        if (callback !== NOOP) {
           callback(amplitude);
-          updateCounter = 0; // Reset counter after sampling
         }
-        updateCounter++;
-      });
+        updateCounter = 0; // Reset counter after sampling
+      }
+      updateCounter++;
+    });
+
+    const stop = () => source.stopAmplitudeMonitoring?.();
+    if (source === this.wavPlayer) {
+      this.stopPlayerAmplitude = stop;
     }
+    if (source === this.wavRecorder) {
+      this.stopRecorderAmplitude = stop;
+    }
+  }
+
+  private _stopAmplitudeMonitoring(): void {
+    this.stopPlayerAmplitude?.();
+    this.stopRecorderAmplitude?.();
+    this.stopPlayerAmplitude = undefined;
+    this.stopRecorderAmplitude = undefined;
   }
 
   /**
@@ -530,12 +551,26 @@ class LayercodeClient implements ILayercodeClient {
    * @async
    * @returns {Promise<void>}
    */
-  async connect(): Promise<void> {
+  async connect(opts?: { conversationId?: string; newConversation?: boolean }): Promise<void> {
+    if (this.status === 'connecting') {
+      return;
+    }
+
+    if (opts?.newConversation) {
+      this.options.conversationId = null;
+      this.conversationId = null;
+    } else if (opts?.conversationId) {
+      this.options.conversationId = opts.conversationId;
+      this.conversationId = opts.conversationId;
+    }
+
     try {
       this._setStatus('connecting');
 
       // Reset turn tracking for clean start
       this._resetTurnTracking();
+      this._stopAmplitudeMonitoring();
+      this._setupDeviceChangeListener();
 
       // Get conversation key from server
       let authorizeSessionRequestBody = {
@@ -559,6 +594,7 @@ class LayercodeClient implements ILayercodeClient {
       }
       const authorizeSessionResponseBody = await authorizeSessionResponse.json();
       this.conversationId = authorizeSessionResponseBody.conversation_id; // Save the conversation_id for use in future reconnects
+      this.options.conversationId = this.conversationId;
 
       // Connect WebSocket
       this.ws = new WebSocket(
@@ -593,8 +629,12 @@ class LayercodeClient implements ILayercodeClient {
       };
       this.ws.onclose = () => {
         console.log('WebSocket connection closed');
-        this._setStatus('disconnected');
-        this.options.onDisconnect();
+        this.ws = null;
+        this._performDisconnectCleanup()
+          .catch((error) => {
+            console.error('Error during disconnect cleanup:', error);
+            this.options.onError(error instanceof Error ? error : new Error(String(error)));
+          });
       };
       this.ws.onerror = (error: Event) => {
         console.error('WebSocket error:', error);
@@ -623,36 +663,21 @@ class LayercodeClient implements ILayercodeClient {
     console.debug('Reset turn tracking state');
   }
 
-  async disconnect(): Promise<void> {
-    this.deviceId = null;
-    this.activeDeviceId = null;
-    this.useSystemDefaultDevice = false;
-    this.lastReportedDeviceId = null;
-    this.lastKnownSystemDefaultDeviceKey = null;
-    this.recorderStarted = false;
-    this.readySent = false;
-
-    // Clean up VAD if it exists
-    if (this.vad) {
-      this.vad.pause();
-      this.vad.destroy();
-      this.vad = null;
+  async disconnect(opts?: { clearConversationId?: boolean }): Promise<void> {
+    if (this.status === 'disconnected') {
+      return;
     }
 
-    this.wavRecorder.listenForDeviceChange(null);
-
-    this.wavRecorder.quit();
-    this.wavPlayer.disconnect();
-
-    // Reset turn tracking
-    this._resetTurnTracking();
-
-    // Close websocket and ensure status is updated
     if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
       this.ws.close();
-      this._setStatus('disconnected');
-      this.options.onDisconnect();
+      this.ws = null;
     }
+
+    await this._performDisconnectCleanup(opts?.clearConversationId);
   }
 
   /**
@@ -762,55 +787,101 @@ class LayercodeClient implements ILayercodeClient {
    * Sets up the device change event listener
    */
   private _setupDeviceChangeListener(): void {
-    this.wavRecorder.listenForDeviceChange(async (devices: any[]) => {
-      try {
-        const defaultDevice = devices.find((device: any) => device.default);
-        const usingDefaultDevice = this.useSystemDefaultDevice;
-        const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
-        const currentDefaultDeviceKey = this._getDeviceComparisonKey(defaultDevice);
+    if (!this.deviceChangeListener) {
+      this.deviceChangeListener = async (devices: any[]) => {
+        try {
+          const defaultDevice = devices.find((device: any) => device.default);
+          const usingDefaultDevice = this.useSystemDefaultDevice;
+          const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
+          const currentDefaultDeviceKey = this._getDeviceComparisonKey(defaultDevice);
 
-        let shouldSwitch = !this.recorderStarted;
+          let shouldSwitch = !this.recorderStarted;
 
-        if (!shouldSwitch) {
-          if (usingDefaultDevice) {
-            if (!defaultDevice) {
-              shouldSwitch = true;
-            } else if (
-              this.activeDeviceId &&
-              defaultDevice.deviceId !== 'default' &&
-              defaultDevice.deviceId !== this.activeDeviceId
-            ) {
-              shouldSwitch = true;
-            } else if (
-              (previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
-              (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted)
-            ) {
-              shouldSwitch = true;
+          if (!shouldSwitch) {
+            if (usingDefaultDevice) {
+              if (!defaultDevice) {
+                shouldSwitch = true;
+              } else if (
+                this.activeDeviceId &&
+                defaultDevice.deviceId !== 'default' &&
+                defaultDevice.deviceId !== this.activeDeviceId
+              ) {
+                shouldSwitch = true;
+              } else if (
+                (previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
+                (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted)
+              ) {
+                shouldSwitch = true;
+              }
+            } else {
+              const matchesRequestedDevice = devices.some(
+                (device: any) => device.deviceId === this.deviceId || device.deviceId === this.activeDeviceId
+              );
+              shouldSwitch = !matchesRequestedDevice;
             }
-          } else {
-            const matchesRequestedDevice = devices.some(
-              (device: any) => device.deviceId === this.deviceId || device.deviceId === this.activeDeviceId
-            );
-            shouldSwitch = !matchesRequestedDevice;
           }
-        }
 
-        this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
+          this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
 
-        if (shouldSwitch) {
-          console.debug('Selecting fallback audio input device');
-          const fallbackDevice = defaultDevice || devices[0];
-          if (fallbackDevice) {
-            const fallbackId = fallbackDevice.default ? 'default' : fallbackDevice.deviceId;
-            await this.setInputDevice(fallbackId);
-          } else {
-            console.warn('No alternative audio device found');
+          if (shouldSwitch) {
+            console.debug('Selecting fallback audio input device');
+            const fallbackDevice = defaultDevice || devices[0];
+            if (fallbackDevice) {
+              const fallbackId = fallbackDevice.default ? 'default' : fallbackDevice.deviceId;
+              await this.setInputDevice(fallbackId);
+            } else {
+              console.warn('No alternative audio device found');
+            }
           }
+        } catch (error) {
+          this.options.onError(error instanceof Error ? error : new Error(String(error)));
         }
-      } catch (error) {
-        this.options.onError(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
+      };
+    }
+
+    this.wavRecorder.listenForDeviceChange(this.deviceChangeListener);
+  }
+
+  private _teardownDeviceListeners(): void {
+    this.wavRecorder.listenForDeviceChange(null);
+  }
+
+  private async _performDisconnectCleanup(clearConversationId?: boolean): Promise<void> {
+    this.deviceId = null;
+    this.activeDeviceId = null;
+    this.useSystemDefaultDevice = false;
+    this.lastReportedDeviceId = null;
+    this.lastKnownSystemDefaultDeviceKey = null;
+    this.recorderStarted = false;
+    this.readySent = false;
+
+    this._stopAmplitudeMonitoring();
+    this._teardownDeviceListeners();
+
+    if (this.vad) {
+      this.vad.pause();
+      this.vad.destroy();
+      this.vad = null;
+    }
+
+    await this.wavRecorder.quit();
+    this.wavPlayer.stop?.();
+    this.wavPlayer.disconnect();
+
+    this._resetTurnTracking();
+
+    if (clearConversationId) {
+      this.options.conversationId = null;
+      this.conversationId = null;
+    } else {
+      this.options.conversationId = this.conversationId;
+    }
+
+    this.userAudioAmplitude = 0;
+    this.agentAudioAmplitude = 0;
+
+    this._setStatus('disconnected');
+    this.options.onDisconnect();
   }
 
   private _getDeviceComparisonKey(device: any): string | null {

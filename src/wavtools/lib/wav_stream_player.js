@@ -21,6 +21,7 @@ export class WavStreamPlayer {
     this.interruptedTrackIds = {};
     this.finishedPlayingCallback = finishedPlayingCallback;
     this.isPlaying = false;
+    this.amplitudeMonitorRaf = undefined;
   }
 
   /**
@@ -106,12 +107,20 @@ export class WavStreamPlayer {
    * @param {function} callback - Function to call with amplitude value
    */
   startAmplitudeMonitoring(callback) {
+    this.stopAmplitudeMonitoring();
     const monitor = () => {
       const amplitude = this.getAmplitude();
       callback(amplitude);
-      requestAnimationFrame(monitor);
+      this.amplitudeMonitorRaf = requestAnimationFrame(monitor);
     };
     monitor();
+  }
+
+  stopAmplitudeMonitoring() {
+    if (this.amplitudeMonitorRaf !== undefined) {
+      cancelAnimationFrame(this.amplitudeMonitorRaf);
+      this.amplitudeMonitorRaf = undefined;
+    }
   }
 
   /**
@@ -260,11 +269,18 @@ export class WavStreamPlayer {
     return true;
   }
 
+  stop() {
+    if (this.stream) {
+      this.stream.port.postMessage({ event: 'stop' });
+    }
+  }
+
   /**
    * Disconnects the audio context and cleans up resources
    * @returns {void}
    */
   disconnect() {
+    this.stopAmplitudeMonitoring();
     if (this.stream) {
       this.stream.disconnect();
       this.stream = null;

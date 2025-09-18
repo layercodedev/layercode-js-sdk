@@ -14,6 +14,7 @@ export class WavRecorder {
   getFrequencies(analysisType?: 'frequency' | 'music' | 'voice', minDecibels?: number, maxDecibels?: number): import('./lib/analysis/audio_analysis.js').AudioAnalysisOutputType;
   getAmplitude(): number;
   startAmplitudeMonitoring(callback: (amplitude: number) => void): void;
+  stopAmplitudeMonitoring(): void;
   getStatus(): 'ended' | 'paused' | 'recording';
   getSampleRate(): number;
   getStream(): MediaStream | null;
@@ -25,6 +26,7 @@ export class WavStreamPlayer {
   disconnect(): void;
   pause(): Promise<true>;
   play(): Promise<true>;
+  stop(): void;
   add16BitPCM(buffer: ArrayBuffer | Int16Array, trackId?: string): Int16Array;
   interrupt(): Promise<{
     trackId: string | null;
@@ -34,6 +36,7 @@ export class WavStreamPlayer {
   getFrequencies(analysisType?: 'frequency' | 'music' | 'voice', minDecibels?: number, maxDecibels?: number): import('./lib/analysis/audio_analysis.js').AudioAnalysisOutputType;
   getAmplitude(): number;
   startAmplitudeMonitoring(callback: (amplitude: number) => void): void;
+  stopAmplitudeMonitoring(): void;
   getTrackSampleOffset(interrupt?: boolean): Promise<{ trackId: string | null; offset: number; currentTime: number } | null>;
   clearInterruptedTracks(keepTrackIds?: string[]): void;
   isPlaying: boolean;
