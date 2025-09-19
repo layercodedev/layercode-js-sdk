@@ -11,6 +11,8 @@ class AudioProcessor extends AudioWorkletProcessor {
     this.foundAudio = false;
     this.recording = false;
     this.chunks = [];
+    this.downsampleRatio = 1;
+    this.downsampleOffset = 0;
   }
 
   /**
@@ -117,9 +119,12 @@ class AudioProcessor extends AudioWorkletProcessor {
   }
 
   receive(e) {
-    const { event, id } = e.data;
+    const { event, id, data } = e.data;
     let receiptData = {};
     switch (event) {
+      case 'configure':
+        this.configure(data);
+        return;
       case 'start':
         this.recording = true;
         break;
@@ -140,6 +145,24 @@ class AudioProcessor extends AudioWorkletProcessor {
     }
     // Always send back receipt
     this.port.postMessage({ event: 'receipt', id, data: receiptData });
+  }
+
+  configure(config = {}) {
+    const inputSampleRate = config?.inputSampleRate;
+    const targetSampleRate = config?.targetSampleRate;
+    if (
+      typeof inputSampleRate === 'number' &&
+      inputSampleRate > 0 &&
+      typeof targetSampleRate === 'number' &&
+      targetSampleRate > 0
+    ) {
+      if (inputSampleRate <= targetSampleRate) {
+        this.downsampleRatio = 1;
+      } else {
+        this.downsampleRatio = inputSampleRate / targetSampleRate;
+      }
+      this.downsampleOffset = 0;
+    }
   }
 
   sendChunk(chunk) {
@@ -194,13 +217,39 @@ class AudioProcessor extends AudioWorkletProcessor {
       }
     }
     if (inputs && inputs[0] && this.foundAudio && this.recording) {
-      // We need to copy the TypedArray, because the \`process\`
+      // We need to copy the TypedArray, because the  \`process\`
       // internals will reuse the same buffer to hold each input
       const chunk = inputs.map((input) => input.slice(sliceIndex));
-      this.chunks.push(chunk);
-      this.sendChunk(chunk);
+      const processedChunk = this.downsampleChunk(chunk);
+      if (processedChunk[0] && processedChunk[0].length) {
+        this.chunks.push(processedChunk);
+        this.sendChunk(processedChunk);
+      }
     }
     return true;
+  }
+
+  downsampleChunk(chunk) {
+    if (this.downsampleRatio === 1) {
+      return chunk;
+    }
+    const channelCount = chunk.length;
+    if (!channelCount || !chunk[0]?.length) {
+      return chunk;
+    }
+    const ratio = this.downsampleRatio;
+    const inputLength = chunk[0].length;
+    const outputs = Array.from({ length: channelCount }, () => []);
+    let offset = this.downsampleOffset;
+    while (offset < inputLength) {
+      const sampleIndex = Math.floor(offset);
+      for (let c = 0; c < channelCount; c++) {
+        outputs[c].push(chunk[c][sampleIndex]);
+      }
+      offset += ratio;
+    }
+    this.downsampleOffset = offset - inputLength;
+    return outputs.map((samples) => Float32Array.from(samples));
   }
 }
 

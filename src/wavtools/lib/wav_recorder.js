@@ -36,10 +36,13 @@ export class WavRecorder {
     this._devices = [];
     // State variables
     this.stream = null;
+    this.audioContext = null;
     this.processor = null;
     this.source = null;
     this.node = null;
+    this.analyser = null;
     this.recording = false;
+    this.contextSampleRate = sampleRate;
     // Event handling with AudioWorklet
     this._lastEventId = 0;
     this.eventReceipts = {};
@@ -248,20 +251,53 @@ export class WavRecorder {
    * @returns {Promise<true>}
    */
   async requestPermission() {
-    const permissionStatus = await navigator.permissions.query({
-      name: 'microphone',
-    });
-    if (permissionStatus.state === 'denied') {
-      window.alert('You must grant microphone access to use this feature.');
-    } else if (permissionStatus.state === 'prompt') {
+    const ensureUserMediaAccess = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+      const tracks = stream.getTracks();
+      tracks.forEach((track) => track.stop());
+    };
+
+    const permissionsUnsupported =
+      !navigator.permissions ||
+      typeof navigator.permissions.query !== 'function';
+
+    if (permissionsUnsupported) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        const tracks = stream.getTracks();
-        tracks.forEach((track) => track.stop());
-      } catch (e) {
+        await ensureUserMediaAccess();
+      } catch (error) {
         window.alert('You must grant microphone access to use this feature.');
+        throw error;
+      }
+      return true;
+    }
+
+    try {
+      const permissionStatus = await navigator.permissions.query({
+        name: 'microphone',
+      });
+
+      if (permissionStatus.state === 'denied') {
+        window.alert('You must grant microphone access to use this feature.');
+        return true;
+      }
+
+      if (permissionStatus.state === 'prompt') {
+        try {
+          await ensureUserMediaAccess();
+        } catch (error) {
+          window.alert('You must grant microphone access to use this feature.');
+          throw error;
+        }
+      }
+    } catch (error) {
+      // Firefox rejects permissions.query with NotSupportedError – fall back to getUserMedia directly
+      try {
+        await ensureUserMediaAccess();
+      } catch (fallbackError) {
+        window.alert('You must grant microphone access to use this feature.');
+        throw fallbackError;
       }
     }
     return true;
@@ -297,6 +333,10 @@ export class WavRecorder {
       }
       defaultDevice.default = true;
       deviceList.push(defaultDevice);
+    } else if (audioDevices.length) {
+      const fallbackDefault = audioDevices.shift();
+      fallbackDefault.default = true;
+      deviceList.push(fallbackDefault);
     }
     return deviceList.concat(audioDevices);
   }
@@ -338,8 +378,36 @@ export class WavRecorder {
       throw new Error('Could not start media stream');
     }
 
-    const context = new AudioContext({ sampleRate: this.sampleRate });
-    const source = context.createMediaStreamSource(this.stream);
+    const createContext = (rate) => {
+      try {
+        return rate ? new AudioContext({ sampleRate: rate }) : new AudioContext();
+      } catch (error) {
+        console.warn('Failed to create AudioContext with sampleRate', rate, error);
+        return null;
+      }
+    };
+
+    let context = createContext(this.sampleRate);
+    if (!context) {
+      context = createContext();
+    }
+    if (!context) {
+      throw new Error('Could not create AudioContext');
+    }
+
+    let source;
+    try {
+      source = context.createMediaStreamSource(this.stream);
+    } catch (error) {
+      await context.close().catch(() => {});
+      context = createContext();
+      if (!context) {
+        throw error;
+      }
+      source = context.createMediaStreamSource(this.stream);
+    }
+
+    this.contextSampleRate = context.sampleRate;
     // Load and execute the module script.
     try {
       await context.audioWorklet.addModule(this.scriptSrc);
@@ -375,6 +443,14 @@ export class WavRecorder {
       }
     };
 
+    processor.port.postMessage({
+      event: 'configure',
+      data: {
+        inputSampleRate: this.contextSampleRate,
+        targetSampleRate: this.sampleRate,
+      },
+    });
+
     const node = source.connect(processor);
     const analyser = context.createAnalyser();
     analyser.fftSize = 8192;
@@ -390,6 +466,15 @@ export class WavRecorder {
       analyser.connect(context.destination);
     }
 
+    if (context.state === 'suspended') {
+      try {
+        await context.resume();
+      } catch (resumeError) {
+        console.warn('AudioContext resume failed', resumeError);
+      }
+    }
+
+    this.audioContext = context;
     this.source = source;
     this.node = node;
     this.analyser = analyser;
@@ -587,6 +672,17 @@ export class WavRecorder {
     this.processor = null;
     this.source = null;
     this.node = null;
+    this.analyser = null;
+
+    if (this.audioContext) {
+      try {
+        await this.audioContext.close();
+      } catch (contextError) {
+        console.warn('Failed to close AudioContext', contextError);
+      }
+      this.audioContext = null;
+    }
+    this.contextSampleRate = null;
 
     const packer = new WavPacker();
     const result = packer.pack(this.sampleRate, exportData.audio);
