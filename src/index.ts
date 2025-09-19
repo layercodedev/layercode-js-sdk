@@ -37,7 +37,7 @@ const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
-const SDK_VERSION = '2.1.2';
+const SDK_VERSION = '2.1.3';
 
 // const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
 // try {
