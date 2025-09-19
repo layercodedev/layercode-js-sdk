@@ -4,6 +4,8 @@ class AudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.port.onmessage = this.receive.bind(this);
+    this.downsampleRatio = 1;
+    this.downsampleOffset = 0;
     this.initialize();
   }
 
@@ -11,7 +13,6 @@ class AudioProcessor extends AudioWorkletProcessor {
     this.foundAudio = false;
     this.recording = false;
     this.chunks = [];
-    this.downsampleRatio = 1;
     this.downsampleOffset = 0;
   }
 
