@@ -89,8 +89,8 @@ const SDK_VERSION = '2.1.3';
  * Interface for LayercodeClient public methods
  */
 interface ILayercodeClient {
-  connect(opts?: { conversationId?: string; newConversation?: boolean }): Promise<void>;
-  disconnect(opts?: { clearConversationId?: boolean }): Promise<void>;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
   triggerUserTurnStarted(): Promise<void>;
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
@@ -546,21 +546,13 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   /**
-   * Connects to the Layercode agent and starts the audio conversation
+   * Connects to the Layercode agent using the stored conversation ID and starts the audio conversation
    * @async
    * @returns {Promise<void>}
    */
-  async connect(opts?: { conversationId?: string; newConversation?: boolean }): Promise<void> {
+  async connect(): Promise<void> {
     if (this.status === 'connecting') {
       return;
-    }
-
-    if (opts?.newConversation) {
-      this.options.conversationId = null;
-      this.conversationId = null;
-    } else if (opts?.conversationId) {
-      this.options.conversationId = opts.conversationId;
-      this.conversationId = opts.conversationId;
     }
 
     try {
@@ -661,7 +653,7 @@ class LayercodeClient implements ILayercodeClient {
     console.debug('Reset turn tracking state');
   }
 
-  async disconnect(opts?: { clearConversationId?: boolean }): Promise<void> {
+  async disconnect(): Promise<void> {
     if (this.status === 'disconnected') {
       return;
     }
@@ -675,7 +667,7 @@ class LayercodeClient implements ILayercodeClient {
       this.ws = null;
     }
 
-    await this._performDisconnectCleanup(opts?.clearConversationId);
+    await this._performDisconnectCleanup();
   }
 
   /**
@@ -835,7 +827,7 @@ class LayercodeClient implements ILayercodeClient {
     this.wavRecorder.listenForDeviceChange(null);
   }
 
-  private async _performDisconnectCleanup(clearConversationId?: boolean): Promise<void> {
+  private async _performDisconnectCleanup(): Promise<void> {
     this.deviceId = null;
     this.activeDeviceId = null;
     this.useSystemDefaultDevice = false;
@@ -859,12 +851,7 @@ class LayercodeClient implements ILayercodeClient {
 
     this._resetTurnTracking();
 
-    if (clearConversationId) {
-      this.options.conversationId = null;
-      this.conversationId = null;
-    } else {
-      this.options.conversationId = this.conversationId;
-    }
+    this.options.conversationId = this.conversationId;
 
     this.userAudioAmplitude = 0;
     this.agentAudioAmplitude = 0;
