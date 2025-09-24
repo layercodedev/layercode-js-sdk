@@ -18,6 +18,7 @@ export default [
       format: "umd",
       sourcemap: true,
       globals: {},
+      inlineDynamicImports: true,
     },
     context: "window",
     plugins: [
@@ -41,6 +42,7 @@ export default [
       format: "esm",
       sourcemap: true,
     },
+    external: ["@ricky0123/vad-web", "onnxruntime-web"],
     plugins: [
       resolve({
         browser: true,

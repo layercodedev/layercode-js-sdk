@@ -1,8 +1,6 @@
 /* eslint-env browser */
 // import { env as ortEnv } from 'onnxruntime-web';
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
-// @ts-ignore - VAD package does not provide TypeScript types
-import { MicVAD } from '@ricky0123/vad-web';
 import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
 import {
   ClientMessage,
@@ -38,6 +36,25 @@ const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
 const SDK_VERSION = '2.1.3';
+
+type MicVADInstance = {
+  start: () => void;
+  pause: () => void;
+  destroy: () => void;
+};
+
+// Lazily load the browser-only VAD module to avoid accessing `self` on the server
+let micVADModulePromise: Promise<any> | null = null;
+const loadMicVADModule = () => {
+  if (typeof window === 'undefined') {
+    return Promise.resolve(null);
+  }
+  if (!micVADModulePromise) {
+    // @ts-ignore - VAD package does not provide TypeScript types
+    micVADModulePromise = import('@ricky0123/vad-web');
+  }
+  return micVADModulePromise;
+};
 
 // const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
 // try {
@@ -150,7 +167,7 @@ class LayercodeClient implements ILayercodeClient {
   private options: Required<LayercodeClientOptions>;
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
-  private vad: MicVAD | null;
+  private vad: MicVADInstance | null;
   private ws: WebSocket | null;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
@@ -240,6 +257,10 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _initializeVAD(): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode, we don't need to use the VAD model
@@ -308,8 +329,12 @@ class LayercodeClient implements ILayercodeClient {
 
     console.log('Creating VAD with options:', vadOptions);
 
-    MicVAD.new(vadOptions)
-      .then((vad: MicVAD) => {
+    loadMicVADModule()
+      .then((module: any) => module?.MicVAD?.new?.(vadOptions) ?? null)
+      .then((vad: MicVADInstance | null) => {
+        if (!vad) {
+          throw new Error('MicVAD module not available');
+        }
         this.vad = vad;
         this.vad.start();
         console.log('VAD started successfully');
