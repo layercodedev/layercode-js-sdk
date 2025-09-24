@@ -78,10 +78,18 @@ export interface ServerResponseDataMessage extends BaseLayercodeMessage {
   turn_id: string;
 }
 
+export interface ServerResponseUserTranscriptInterimDelta extends BaseLayercodeMessage {
+  type: 'user.transcript.interim_delta';
+  content: string;
+  turn_id: string;
+  delta_counter: number;
+}
+
 export interface ServerResponseUserTranscriptDelta extends BaseLayercodeMessage {
   type: 'user.transcript.delta';
   content: string;
   turn_id: string;
+  delta_counter: number;
 }
 
 export interface ServerResponseUserTranscript extends BaseLayercodeMessage {
@@ -115,6 +123,7 @@ export type ServerMessage =
   | ServerResponseAudioMessage
   | ServerResponseTextMessage
   | ServerResponseDataMessage
+  | ServerResponseUserTranscriptInterimDelta
   | ServerResponseUserTranscriptDelta
   | ServerResponseUserTranscript;
 

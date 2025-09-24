@@ -418,6 +418,7 @@ class LayercodeClient implements ILayercodeClient {
 
         case 'user.transcript':
         case 'user.transcript.delta':
+        case 'user.transcript.interim_delta':
           this.options.onMessage(message);
           break;
 
