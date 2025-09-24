@@ -12,6 +12,7 @@ export type LayercodeMessageType =
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
   | 'response.data' // Webhook event forwarded by server to client
+  | 'user.transcript.interim_delta' // Interial partial user transcript text that will updated as confidance in the transcription increases
   | 'user.transcript.delta' // Partial user transcript text as it's transcribed
   | 'user.transcript'; // Final user transcript text at end of user turn
 
