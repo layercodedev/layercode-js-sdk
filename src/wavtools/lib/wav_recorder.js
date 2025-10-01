@@ -251,54 +251,14 @@ export class WavRecorder {
    * @returns {Promise<true>}
    */
   async requestPermission() {
-    const ensureUserMediaAccess = async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({
+    try {
+      console.log('ensureUserMediaAccess');
+      await navigator.mediaDevices.getUserMedia({
         audio: true,
       });
-      const tracks = stream.getTracks();
-      tracks.forEach((track) => track.stop());
-    };
-
-    const permissionsUnsupported =
-      !navigator.permissions ||
-      typeof navigator.permissions.query !== 'function';
-
-    if (permissionsUnsupported) {
-      try {
-        await ensureUserMediaAccess();
-      } catch (error) {
-        window.alert('You must grant microphone access to use this feature.');
-        throw error;
-      }
-      return true;
-    }
-
-    try {
-      const permissionStatus = await navigator.permissions.query({
-        name: 'microphone',
-      });
-
-      if (permissionStatus.state === 'denied') {
-        window.alert('You must grant microphone access to use this feature.');
-        return true;
-      }
-
-      if (permissionStatus.state === 'prompt') {
-        try {
-          await ensureUserMediaAccess();
-        } catch (error) {
-          window.alert('You must grant microphone access to use this feature.');
-          throw error;
-        }
-      }
-    } catch (error) {
-      // Firefox rejects permissions.query with NotSupportedError – fall back to getUserMedia directly
-      try {
-        await ensureUserMediaAccess();
-      } catch (fallbackError) {
-        window.alert('You must grant microphone access to use this feature.');
-        throw fallbackError;
-      }
+    } catch (fallbackError) {
+      window.alert('You must grant microphone access to use this feature.');
+      throw fallbackError;
     }
     return true;
   }
@@ -315,10 +275,9 @@ export class WavRecorder {
       throw new Error('Could not request user devices');
     }
     await this.requestPermission();
+
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioDevices = devices.filter(
-      (device) => device.kind === 'audioinput',
-    );
+    const audioDevices = devices.filter((device) => device.kind === 'audioinput');
     const defaultDeviceIndex = audioDevices.findIndex(
       (device) => device.deviceId === 'default',
     );

@@ -95,6 +95,7 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
+  listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   mute(): void;
   unmute(): void;
   readonly status: string;
@@ -126,6 +127,8 @@ interface LayercodeClientOptions {
   onError?: (error: Error) => void;
   /** Callback when a device is switched */
   onDeviceSwitched?: (deviceId: string) => void;
+  /** Callback when available devices change (devices added/removed) */
+  onDevicesChanged?: (devices: Array<MediaDeviceInfo & { default: boolean }>) => void;
   /** Callback for data messages */
   onDataMessage?: (message: any) => void;
   /** Callback for other messages (excluding audio msgs) */
@@ -192,6 +195,7 @@ class LayercodeClient implements ILayercodeClient {
       onDisconnect: options.onDisconnect ?? NOOP,
       onError: options.onError ?? NOOP,
       onDeviceSwitched: options.onDeviceSwitched ?? NOOP,
+      onDevicesChanged: options.onDevicesChanged ?? NOOP,
       onDataMessage: options.onDataMessage ?? NOOP,
       onMessage: options.onMessage ?? NOOP,
       onUserAmplitudeChange: options.onUserAmplitudeChange ?? NOOP,
@@ -562,7 +566,6 @@ class LayercodeClient implements ILayercodeClient {
       // Reset turn tracking for clean start
       this._resetTurnTracking();
       this._stopAmplitudeMonitoring();
-      this._setupDeviceChangeListener();
 
       // Get conversation key from server
       let authorizeSessionRequestBody = {
@@ -587,6 +590,9 @@ class LayercodeClient implements ILayercodeClient {
       const authorizeSessionResponseBody = await authorizeSessionResponse.json();
       this.conversationId = authorizeSessionResponseBody.conversation_id; // Save the conversation_id for use in future reconnects
       this.options.conversationId = this.conversationId;
+
+      await this.wavRecorder.requestPermission();
+      this._setupDeviceChangeListener();
 
       // Connect WebSocket
       this.ws = new WebSocket(
@@ -645,7 +651,6 @@ class LayercodeClient implements ILayercodeClient {
       console.error('Error connecting to Layercode agent:', error);
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
-      throw error;
     }
   }
 
@@ -677,6 +682,14 @@ class LayercodeClient implements ILayercodeClient {
    */
   getStream(): MediaStream | null {
     return this.wavRecorder.getStream();
+  }
+
+  /**
+   * List all available audio input devices
+   * @returns {Promise<Array<MediaDeviceInfo & {default: boolean}>>}
+   */
+  async listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>> {
+    return this.wavRecorder.listDevices();
   }
 
   /**
@@ -778,6 +791,9 @@ class LayercodeClient implements ILayercodeClient {
     if (!this.deviceChangeListener) {
       this.deviceChangeListener = async (devices: any[]) => {
         try {
+          // Notify user that devices have changed
+          this.options.onDevicesChanged(devices);
+
           const defaultDevice = devices.find((device: any) => device.default);
           const usingDefaultDevice = this.useSystemDefaultDevice;
           const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
