@@ -13,7 +13,7 @@ import {
   ClientVadEventsMessage,
 } from './interfaces.js';
 
-interface AgentConfig {
+export interface AgentConfig {
   transcription: {
     trigger: 'push_to_talk' | 'automatic';
     can_interrupt: boolean;
@@ -120,7 +120,7 @@ interface LayercodeClientOptions {
   /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
-  onConnect?: ({ conversationId }: { conversationId: string | null }) => void;
+  onConnect?: ({ conversationId, config }: { conversationId: string | null; config?: AgentConfig }) => void;
   /** Callback when connection is closed */
   onDisconnect?: () => void;
   /** Callback when an error occurs */
@@ -620,7 +620,7 @@ class LayercodeClient implements ILayercodeClient {
       this.ws.onopen = () => {
         console.log('WebSocket connection established');
         this._setStatus('connected');
-        this.options.onConnect({ conversationId: this.conversationId });
+        this.options.onConnect({ conversationId: this.conversationId, config });
 
         // Attempt to send ready message if recorder already started
         this._sendReadyIfNeeded();
@@ -921,4 +921,4 @@ class LayercodeClient implements ILayercodeClient {
 }
 
 export default LayercodeClient;
-export type { ILayercodeClient, LayercodeClientOptions };
+export type { AgentConfig, ILayercodeClient, LayercodeClientOptions };
