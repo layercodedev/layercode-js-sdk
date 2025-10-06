@@ -16,4 +16,4 @@ Or you can use a script tag in your HTML:
 
 ## Usage
 
-Read the docs: [https://docs.layercode.com/sdk-reference/vanilla_js_sdk](https://docs.layercode.com/sdk-reference/vanilla_js_sdk)
+Read the docs: [https://docs.layercode.com/sdk-reference/vanilla-js-sdk](https://docs.layercode.com/sdk-reference/vanilla_js_sdk)
