@@ -11,6 +11,7 @@ import {
   ClientTriggerTurnMessage,
   ClientTriggerResponseAudioReplayFinishedMessage,
   ClientVadEventsMessage,
+  ClientResponseTextMessage,
 } from './interfaces.js';
 
 interface AgentConfig {
@@ -37,7 +38,7 @@ const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
-const SDK_VERSION = '2.1.3';
+const SDK_VERSION = '2.2.0';
 
 // const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
 // try {
@@ -98,6 +99,7 @@ interface ILayercodeClient {
   listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   mute(): void;
   unmute(): void;
+  sendClientResponseText(text: string): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
@@ -365,6 +367,11 @@ class LayercodeClient implements ILayercodeClient {
       this.pushToTalkActive = false;
       this._wsSend({ type: 'trigger.turn.end', role: 'user' } as ClientTriggerTurnMessage);
     }
+  }
+
+  async sendClientResponseText(text: string): Promise<void> {
+    await this._clientInterruptAssistantReplay();
+    this._wsSend({ type: 'client.response.text', content: text } as ClientResponseTextMessage);
   }
 
   /**
