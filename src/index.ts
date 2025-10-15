@@ -11,9 +11,10 @@ import {
   ClientTriggerTurnMessage,
   ClientTriggerResponseAudioReplayFinishedMessage,
   ClientVadEventsMessage,
+  ClientResponseTextMessage,
 } from './interfaces.js';
 
-interface AgentConfig {
+export interface AgentConfig {
   transcription: {
     trigger: 'push_to_talk' | 'automatic';
     can_interrupt: boolean;
@@ -49,7 +50,7 @@ const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
-const SDK_VERSION = '2.1.3';
+const SDK_VERSION = '2.2.1';
 
 // const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
 // try {
@@ -107,8 +108,10 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
+  listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   mute(): void;
   unmute(): void;
+  sendClientResponseText(text: string): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
@@ -133,13 +136,15 @@ interface LayercodeClientOptions {
   /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
-  onConnect?: ({ conversationId }: { conversationId: string | null }) => void;
+  onConnect?: ({ conversationId, config }: { conversationId: string | null; config?: AgentConfig }) => void;
   /** Callback when connection is closed */
   onDisconnect?: () => void;
   /** Callback when an error occurs */
   onError?: (error: Error) => void;
   /** Callback when a device is switched */
   onDeviceSwitched?: (deviceId: string) => void;
+  /** Callback when available devices change (devices added/removed) */
+  onDevicesChanged?: (devices: Array<MediaDeviceInfo & { default: boolean }>) => void;
   /** Callback for data messages */
   onDataMessage?: (message: any) => void;
   /** Callback for other messages (excluding audio msgs) */
@@ -210,6 +215,7 @@ class LayercodeClient implements ILayercodeClient {
       onDisconnect: options.onDisconnect ?? NOOP,
       onError: options.onError ?? NOOP,
       onDeviceSwitched: options.onDeviceSwitched ?? NOOP,
+      onDevicesChanged: options.onDevicesChanged ?? NOOP,
       onDataMessage: options.onDataMessage ?? NOOP,
       onMessage: options.onMessage ?? NOOP,
       onUserAmplitudeChange: options.onUserAmplitudeChange ?? NOOP,
@@ -379,6 +385,11 @@ class LayercodeClient implements ILayercodeClient {
       this.pushToTalkActive = false;
       this._wsSend({ type: 'trigger.turn.end', role: 'user' } as ClientTriggerTurnMessage);
     }
+  }
+
+  async sendClientResponseText(text: string): Promise<void> {
+    await this._clientInterruptAssistantReplay();
+    this._wsSend({ type: 'client.response.text', content: text } as ClientResponseTextMessage);
   }
 
   /**
@@ -580,7 +591,6 @@ class LayercodeClient implements ILayercodeClient {
       // Reset turn tracking for clean start
       this._resetTurnTracking();
       this._stopAmplitudeMonitoring();
-      this._setupDeviceChangeListener();
 
       // Get conversation key from server
       const authorizeSessionRequestBody = {
@@ -615,6 +625,9 @@ class LayercodeClient implements ILayercodeClient {
       this.conversationId = authorizeSessionResponseBody.conversation_id; // Save the conversation_id for use in future reconnects
       this.options.conversationId = this.conversationId;
 
+      await this.wavRecorder.requestPermission();
+      this._setupDeviceChangeListener();
+
       // Connect WebSocket
       this.ws = new WebSocket(
         `${this._websocketUrl}?${new URLSearchParams({
@@ -641,7 +654,7 @@ class LayercodeClient implements ILayercodeClient {
       this.ws.onopen = () => {
         console.log('WebSocket connection established');
         this._setStatus('connected');
-        this.options.onConnect({ conversationId: this.conversationId });
+        this.options.onConnect({ conversationId: this.conversationId, config });
 
         // Attempt to send ready message if recorder already started
         this._sendReadyIfNeeded();
@@ -672,7 +685,6 @@ class LayercodeClient implements ILayercodeClient {
       console.error('Error connecting to Layercode agent:', error);
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
-      throw error;
     }
   }
 
@@ -704,6 +716,14 @@ class LayercodeClient implements ILayercodeClient {
    */
   getStream(): MediaStream | null {
     return this.wavRecorder.getStream();
+  }
+
+  /**
+   * List all available audio input devices
+   * @returns {Promise<Array<MediaDeviceInfo & {default: boolean}>>}
+   */
+  async listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>> {
+    return this.wavRecorder.listDevices();
   }
 
   /**
@@ -805,6 +825,9 @@ class LayercodeClient implements ILayercodeClient {
     if (!this.deviceChangeListener) {
       this.deviceChangeListener = async (devices: any[]) => {
         try {
+          // Notify user that devices have changed
+          this.options.onDevicesChanged(devices);
+
           const defaultDevice = devices.find((device: any) => device.default);
           const usingDefaultDevice = this.useSystemDefaultDevice;
           const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
@@ -932,4 +955,8 @@ class LayercodeClient implements ILayercodeClient {
 }
 
 export default LayercodeClient;
+<<<<<<< HEAD
 export type { ILayercodeClient, LayercodeClientOptions, AuthorizeSessionRequest, AuthorizeSessionRequestParams };
+=======
+export type { AgentConfig, ILayercodeClient, LayercodeClientOptions };
+>>>>>>> c7dc1bb1f9b935a9a5615929489ab408ac279fbd
