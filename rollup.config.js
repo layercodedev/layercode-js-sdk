@@ -1,33 +1,36 @@
-import resolve from "@rollup/plugin-node-resolve";
-import commonjs from "@rollup/plugin-commonjs";
-import typescript from "@rollup/plugin-typescript";
-import { readFileSync } from "fs";
+import resolve from '@rollup/plugin-node-resolve';
+import commonjs from '@rollup/plugin-commonjs';
+import typescript from '@rollup/plugin-typescript';
+import { readFileSync } from 'fs';
 
 // Read package.json
-const pkg = JSON.parse(
-  readFileSync(new URL("./package.json", import.meta.url), "utf8")
-);
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
 export default [
   // UMD build for browsers (minified) - for direct script tag usage
   {
-    input: "src/index.ts",
+    input: 'src/index.ts',
     output: {
-      name: "LayercodeClient",
+      name: 'LayercodeClient',
       file: pkg.browser,
-      format: "umd",
+      format: 'umd',
       sourcemap: true,
       globals: {},
     },
-    context: "window",
+    onwarn: (warning, warn) => {
+      // suppress eval warnings
+      if (warning.code === 'EVAL') return;
+      warn(warning);
+    },
+    context: 'window',
     plugins: [
       resolve({
         browser: true,
-        extensions: [".js", ".ts"],
+        extensions: ['.js', '.ts'],
       }),
       commonjs(),
       typescript({
-        tsconfig: "./tsconfig.json",
+        tsconfig: './tsconfig.json',
         sourceMap: true,
         inlineSources: true,
       }),
@@ -35,24 +38,29 @@ export default [
   },
   // ESM build for modern browsers and frameworks
   {
-    input: "src/index.ts",
+    input: 'src/index.ts',
     output: {
       file: pkg.module || pkg.main,
-      format: "esm",
+      format: 'esm',
       sourcemap: true,
+    },
+    onwarn: (warning, warn) => {
+      // suppress eval warnings
+      if (warning.code === 'EVAL') return;
+      warn(warning);
     },
     plugins: [
       resolve({
         browser: true,
-        extensions: [".js", ".ts"],
+        extensions: ['.js', '.ts'],
       }),
       commonjs(),
       typescript({
-        tsconfig: "./tsconfig.json",
+        tsconfig: './tsconfig.json',
         sourceMap: true,
         inlineSources: true,
         declaration: true,
-        declarationDir: "./dist/types",
+        declarationDir: './dist/types',
       }),
     ],
   },
