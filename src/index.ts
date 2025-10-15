@@ -33,6 +33,18 @@ interface AgentConfig {
   };
 }
 
+interface AuthorizeSessionRequestParams {
+  url: string;
+  body: {
+    agent_id: string;
+    metadata: Record<string, any>;
+    sdk_version: string;
+    conversation_id?: string | null;
+  };
+}
+
+type AuthorizeSessionRequest = (params: AuthorizeSessionRequestParams) => Promise<Response>;
+
 const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
@@ -114,6 +126,8 @@ interface LayercodeClientOptions {
   conversationId?: string | null;
   /** The endpoint URL for the audio agent API */
   authorizeSessionEndpoint: string;
+  /** Optional custom request handler for authorizing a session */
+  authorizeSessionRequest?: AuthorizeSessionRequest;
   /** Metadata to send with webhooks */
   metadata?: Record<string, any>;
   /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
@@ -142,12 +156,15 @@ interface LayercodeClientOptions {
   onMuteStateChange?: (isMuted: boolean) => void;
 }
 
+type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest'>> &
+  Pick<LayercodeClientOptions, 'authorizeSessionRequest'>;
+
 /**
  * @class LayercodeClient
  * @classdesc Core client for Layercode audio agent that manages audio recording, WebSocket communication, and speech processing.
  */
 class LayercodeClient implements ILayercodeClient {
-  private options: Required<LayercodeClientOptions>;
+  private options: NormalizedLayercodeClientOptions;
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
   private vad: MicVAD | null;
@@ -186,6 +203,7 @@ class LayercodeClient implements ILayercodeClient {
       agentId: options.agentId,
       conversationId: options.conversationId ?? null,
       authorizeSessionEndpoint: options.authorizeSessionEndpoint,
+      authorizeSessionRequest: options.authorizeSessionRequest,
       metadata: options.metadata ?? {},
       vadResumeDelay: options.vadResumeDelay ?? 500,
       onConnect: options.onConnect ?? NOOP,
@@ -565,7 +583,7 @@ class LayercodeClient implements ILayercodeClient {
       this._setupDeviceChangeListener();
 
       // Get conversation key from server
-      let authorizeSessionRequestBody = {
+      const authorizeSessionRequestBody = {
         agent_id: this.options.agentId,
         metadata: this.options.metadata,
         sdk_version: SDK_VERSION,
@@ -574,13 +592,22 @@ class LayercodeClient implements ILayercodeClient {
       if (this.options.conversationId) {
         authorizeSessionRequestBody.conversation_id = this.options.conversationId;
       }
-      const authorizeSessionResponse = await fetch(this.options.authorizeSessionEndpoint, {
+      const defaultRequestInit: RequestInit = {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(authorizeSessionRequestBody),
-      });
+      };
+      const authorizeSessionResponse = this.options.authorizeSessionRequest
+        ? await this.options.authorizeSessionRequest({
+            url: this.options.authorizeSessionEndpoint,
+            body: authorizeSessionRequestBody,
+          })
+        : await fetch(this.options.authorizeSessionEndpoint, defaultRequestInit);
+      if (!authorizeSessionResponse) {
+        throw new Error('authorizeSessionRequest did not return a response');
+      }
       if (!authorizeSessionResponse.ok) {
         throw new Error(`Failed to authorize conversation: ${authorizeSessionResponse.statusText}`);
       }
@@ -905,4 +932,4 @@ class LayercodeClient implements ILayercodeClient {
 }
 
 export default LayercodeClient;
-export type { ILayercodeClient, LayercodeClientOptions };
+export type { ILayercodeClient, LayercodeClientOptions, AuthorizeSessionRequest, AuthorizeSessionRequestParams };
