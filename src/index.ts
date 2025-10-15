@@ -161,8 +161,7 @@ interface LayercodeClientOptions {
   onMuteStateChange?: (isMuted: boolean) => void;
 }
 
-type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest'>> &
-  Pick<LayercodeClientOptions, 'authorizeSessionRequest'>;
+type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest'>> & Pick<LayercodeClientOptions, 'authorizeSessionRequest'>;
 
 /**
  * @class LayercodeClient
@@ -746,7 +745,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -786,7 +785,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
@@ -955,8 +954,4 @@ class LayercodeClient implements ILayercodeClient {
 }
 
 export default LayercodeClient;
-<<<<<<< HEAD
 export type { ILayercodeClient, LayercodeClientOptions, AuthorizeSessionRequest, AuthorizeSessionRequestParams };
-=======
-export type { AgentConfig, ILayercodeClient, LayercodeClientOptions };
->>>>>>> c7dc1bb1f9b935a9a5615929489ab408ac279fbd
