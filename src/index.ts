@@ -12,6 +12,7 @@ import {
   ClientTriggerResponseAudioReplayFinishedMessage,
   ClientVadEventsMessage,
   ClientResponseTextMessage,
+  ClientResponseDataMessage,
 } from './interfaces.js';
 
 export interface AgentConfig {
@@ -391,6 +392,10 @@ class LayercodeClient implements ILayercodeClient {
     this._wsSend({ type: 'client.response.text', content: text } as ClientResponseTextMessage);
   }
 
+  async sendClientResponseData(data: any): Promise<void> {
+    this._wsSend({ type: 'client.response.data', data: data } as ClientResponseDataMessage);
+  }
+
   /**
    * Handles incoming WebSocket messages
    * @param {MessageEvent} event - The WebSocket message event
@@ -745,7 +750,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -785,7 +790,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
