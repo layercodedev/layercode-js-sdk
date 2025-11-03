@@ -162,8 +162,12 @@ interface LayercodeClientOptions {
   onStatusChange?: (status: string) => void;
   /** Callback when user turn changes */
   onUserIsSpeakingChange?: (isSpeaking: boolean) => void;
+  /** Callback when assistant speaking state changes */
+  onAssistantSpeakingChange?: (isSpeaking: boolean) => void;
   /** Callback when mute state changes */
   onMuteStateChange?: (isMuted: boolean) => void;
+  /** Whether amplitude monitoring should run for mic and speaker */
+  enableAmplitudeMonitoring?: boolean;
 }
 
 type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest'>> & Pick<LayercodeClientOptions, 'authorizeSessionRequest'>;
@@ -184,6 +188,7 @@ class LayercodeClient implements ILayercodeClient {
   private pushToTalkEnabled: boolean;
   private canInterrupt: boolean;
   private userIsSpeaking: boolean;
+  private assistantIsSpeaking: boolean;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
@@ -229,7 +234,9 @@ class LayercodeClient implements ILayercodeClient {
       onAgentAmplitudeChange: options.onAgentAmplitudeChange ?? NOOP,
       onStatusChange: options.onStatusChange ?? NOOP,
       onUserIsSpeakingChange: options.onUserIsSpeakingChange ?? NOOP,
+      onAssistantSpeakingChange: options.onAssistantSpeakingChange ?? NOOP,
       onMuteStateChange: options.onMuteStateChange ?? NOOP,
+      enableAmplitudeMonitoring: options.enableAmplitudeMonitoring ?? true,
     };
 
     this.audioInput = options.audioInput ?? true;
@@ -254,6 +261,7 @@ class LayercodeClient implements ILayercodeClient {
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
+    this.assistantIsSpeaking = false;
     this.recorderStarted = false;
     this.readySent = false;
     this.currentTurnId = null;
@@ -368,11 +376,20 @@ class LayercodeClient implements ILayercodeClient {
     this.options.onStatusChange(status);
   }
 
+  private _setAssistantSpeaking(isSpeaking: boolean): void {
+    if (this.assistantIsSpeaking === isSpeaking) {
+      return;
+    }
+    this.assistantIsSpeaking = isSpeaking;
+    this.options.onAssistantSpeakingChange(isSpeaking);
+  }
+
   /**
    * Handles when agent audio finishes playing
    */
   private _clientResponseAudioReplayFinished(): void {
     console.debug('clientResponseAudioReplayFinished');
+    this._setAssistantSpeaking(false);
     this._wsSend({
       type: 'trigger.response.audio.replay_finished',
       reason: 'completed',
@@ -381,6 +398,7 @@ class LayercodeClient implements ILayercodeClient {
 
   private async _clientInterruptAssistantReplay(): Promise<void> {
     await this.wavPlayer.interrupt();
+    this._setAssistantSpeaking(false);
   }
 
   async triggerUserTurnStarted(): Promise<void> {
@@ -420,15 +438,20 @@ class LayercodeClient implements ILayercodeClient {
           if (message.role === 'assistant') {
             // Start tracking new assistant turn
             console.debug('Assistant turn started, will track new turn ID from audio/text');
+            this._setAssistantSpeaking(true);
           } else if (message.role === 'user' && !this.pushToTalkEnabled) {
             // Interrupt any playing assistant audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
             console.debug('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
             await this._clientInterruptAssistantReplay();
+            this._setAssistantSpeaking(false);
+          } else if (message.role === 'user') {
+            this._setAssistantSpeaking(false);
           }
           this.options.onMessage(message);
           break;
 
         case 'response.audio':
+          this._setAssistantSpeaking(true);
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
 
@@ -559,12 +582,15 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _setupAmplitudeMonitoring(source: WavRecorder | WavStreamPlayer, callback: (amplitude: number) => void, updateInternalState: (amplitude: number) => void): void {
     let updateCounter = 0;
+    const shouldEmit = this.options.enableAmplitudeMonitoring;
+
     source.startAmplitudeMonitoring((amplitude: number) => {
       // Only update and call callback at the specified sample rate
       if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
-        updateInternalState(amplitude);
-        if (callback !== NOOP) {
-          callback(amplitude);
+        const value = shouldEmit ? amplitude : 0;
+        updateInternalState(value);
+        if (shouldEmit && callback !== NOOP) {
+          callback(value);
         }
         updateCounter = 0; // Reset counter after sampling
       }
@@ -577,6 +603,10 @@ class LayercodeClient implements ILayercodeClient {
     }
     if (source === this.wavRecorder) {
       this.stopRecorderAmplitude = stop;
+    }
+
+    if (!shouldEmit) {
+      updateInternalState(0);
     }
   }
 
@@ -760,6 +790,9 @@ class LayercodeClient implements ILayercodeClient {
     await this.wavPlayer.connect();
     // Set up audio player amplitude monitoring
     this._setupAmplitudeMonitoring(this.wavPlayer, this.options.onAgentAmplitudeChange, (amp) => (this.agentAudioAmplitude = amp));
+    if (!this.options.enableAmplitudeMonitoring) {
+      this.agentAudioAmplitude = 0;
+    }
   }
 
   private async connectToAudioInput() {
@@ -771,6 +804,7 @@ class LayercodeClient implements ILayercodeClient {
 
   private _resetTurnTracking(): void {
     this.currentTurnId = null;
+    this._setAssistantSpeaking(false);
     console.debug('Reset turn tracking state');
   }
 
@@ -854,6 +888,9 @@ class LayercodeClient implements ILayercodeClient {
 
       // Re-setup amplitude monitoring with the new stream
       this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+      if (!this.options.enableAmplitudeMonitoring) {
+        this.userAudioAmplitude = 0;
+      }
 
       const previousReportedDeviceId = this.lastReportedDeviceId;
       const stream = this.wavRecorder.getStream();
