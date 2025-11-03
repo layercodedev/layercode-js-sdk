@@ -544,7 +544,8 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _sendReadyIfNeeded(): void {
-    if (this.recorderStarted && this.ws?.readyState === WebSocket.OPEN && !this.readySent) {
+    const audioReady = this.recorderStarted || !this.audioInput;
+    if (audioReady && this.ws?.readyState === WebSocket.OPEN && !this.readySent) {
       this._wsSend({ type: 'client.ready' } as ClientMessage);
       this.readySent = true;
     }
