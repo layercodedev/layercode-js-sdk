@@ -118,6 +118,8 @@ interface ILayercodeClient {
   readonly agentAudioAmplitude: number;
   readonly isMuted: boolean;
   readonly conversationId: string | null;
+  readonly userSpeaking: boolean;
+  readonly agentSpeaking: boolean;
 }
 
 /**
@@ -138,7 +140,7 @@ interface LayercodeClientOptions {
   audioInput?: boolean;
   /** Fired when audio input flag changes */
   audioInputChanged?: (audioInput: boolean) => void;
-  /** Milliseconds before resuming assistant audio after temporary pause due to user interruption (which was actually a false interruption) */
+  /** Milliseconds before resuming agent audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
   onConnect?: ({ conversationId, config }: { conversationId: string | null; config?: AgentConfig }) => void;
@@ -162,8 +164,8 @@ interface LayercodeClientOptions {
   onStatusChange?: (status: string) => void;
   /** Callback when user turn changes */
   onUserIsSpeakingChange?: (isSpeaking: boolean) => void;
-  /** Callback when assistant speaking state changes */
-  onAssistantSpeakingChange?: (isSpeaking: boolean) => void;
+  /** Callback when agent speaking state changes */
+  onAgentSpeakingChange?: (isSpeaking: boolean) => void;
   /** Callback when mute state changes */
   onMuteStateChange?: (isMuted: boolean) => void;
   /** Whether amplitude monitoring should run for mic and speaker */
@@ -188,7 +190,7 @@ class LayercodeClient implements ILayercodeClient {
   private pushToTalkEnabled: boolean;
   private canInterrupt: boolean;
   private userIsSpeaking: boolean;
-  private assistantIsSpeaking: boolean;
+  private agentIsSpeaking: boolean;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
@@ -234,7 +236,7 @@ class LayercodeClient implements ILayercodeClient {
       onAgentAmplitudeChange: options.onAgentAmplitudeChange ?? NOOP,
       onStatusChange: options.onStatusChange ?? NOOP,
       onUserIsSpeakingChange: options.onUserIsSpeakingChange ?? NOOP,
-      onAssistantSpeakingChange: options.onAssistantSpeakingChange ?? NOOP,
+      onAgentSpeakingChange: options.onAgentSpeakingChange ?? NOOP,
       onMuteStateChange: options.onMuteStateChange ?? NOOP,
       enableAmplitudeMonitoring: options.enableAmplitudeMonitoring ?? true,
     };
@@ -261,7 +263,7 @@ class LayercodeClient implements ILayercodeClient {
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
-    this.assistantIsSpeaking = false;
+    this.agentIsSpeaking = false;
     this.recorderStarted = false;
     this.readySent = false;
     this.currentTurnId = null;
@@ -301,29 +303,29 @@ class LayercodeClient implements ILayercodeClient {
       stream: this.wavRecorder.getStream() || undefined,
       onSpeechStart: () => {
         console.debug('onSpeechStart: sending vad_start');
-        this.userIsSpeaking = true;
-        this.options.onUserIsSpeakingChange(true);
-        this._wsSend({
+        this._setUserSpeaking(true);
+        const vadStartMessage: ClientVadEventsMessage = {
           type: 'vad_events',
           event: 'vad_start',
-        } as ClientVadEventsMessage);
+        };
+        this._wsSend(vadStartMessage);
         this.options.onMessage({
-          type: 'vad_events',
-          event: 'vad_start',
+          ...vadStartMessage,
+          userSpeaking: this.userIsSpeaking,
         });
       },
       onSpeechEnd: () => {
         console.debug('onSpeechEnd: sending vad_end');
-        this.userIsSpeaking = false;
-        this.options.onUserIsSpeakingChange(false);
+        this._setUserSpeaking(false);
         this.audioBuffer = []; // Clear buffer on speech end
-        this._wsSend({
+        const vadEndMessage: ClientVadEventsMessage = {
           type: 'vad_events',
           event: 'vad_end',
-        } as ClientVadEventsMessage);
+        };
+        this._wsSend(vadEndMessage);
         this.options.onMessage({
-          type: 'vad_events',
-          event: 'vad_end',
+          ...vadEndMessage,
+          userSpeaking: this.userIsSpeaking,
         });
       },
     };
@@ -360,10 +362,15 @@ class LayercodeClient implements ILayercodeClient {
       .catch((error: any) => {
         console.warn('Error initializing VAD:', error);
         // Send a message to server indicating VAD failure
-        this._wsSend({
+        const vadFailureMessage: ClientVadEventsMessage = {
           type: 'vad_events',
           event: 'vad_model_failed',
-        } as ClientVadEventsMessage);
+        };
+        this._wsSend(vadFailureMessage);
+        this.options.onMessage({
+          ...vadFailureMessage,
+          userSpeaking: this.userIsSpeaking,
+        });
       });
   }
 
@@ -376,12 +383,20 @@ class LayercodeClient implements ILayercodeClient {
     this.options.onStatusChange(status);
   }
 
-  private _setAssistantSpeaking(isSpeaking: boolean): void {
-    if (this.assistantIsSpeaking === isSpeaking) {
+  private _setAgentSpeaking(isSpeaking: boolean): void {
+    if (this.agentIsSpeaking === isSpeaking) {
       return;
     }
-    this.assistantIsSpeaking = isSpeaking;
-    this.options.onAssistantSpeakingChange(isSpeaking);
+    this.agentIsSpeaking = isSpeaking;
+    this.options.onAgentSpeakingChange(isSpeaking);
+  }
+
+  private _setUserSpeaking(isSpeaking: boolean): void {
+    if (this.userIsSpeaking === isSpeaking) {
+      return;
+    }
+    this.userIsSpeaking = isSpeaking;
+    this.options.onUserIsSpeakingChange(isSpeaking);
   }
 
   /**
@@ -389,35 +404,42 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _clientResponseAudioReplayFinished(): void {
     console.debug('clientResponseAudioReplayFinished');
-    this._setAssistantSpeaking(false);
-    this._wsSend({
+    this._setAgentSpeaking(false);
+    const replayFinishedMessage: ClientTriggerResponseAudioReplayFinishedMessage = {
       type: 'trigger.response.audio.replay_finished',
       reason: 'completed',
-    } as ClientTriggerResponseAudioReplayFinishedMessage);
+    };
+    this.options.onMessage({
+      ...replayFinishedMessage,
+      agentSpeaking: this.agentIsSpeaking,
+    });
+    this._wsSend(replayFinishedMessage);
   }
 
-  private async _clientInterruptAssistantReplay(): Promise<void> {
+  private async _clientInterruptAgentReplay(): Promise<void> {
     await this.wavPlayer.interrupt();
-    this._setAssistantSpeaking(false);
+    this._setAgentSpeaking(false);
   }
 
   async triggerUserTurnStarted(): Promise<void> {
     if (!this.pushToTalkActive) {
       this.pushToTalkActive = true;
+      this._setUserSpeaking(true);
       this._wsSend({ type: 'trigger.turn.start', role: 'user' } as ClientTriggerTurnMessage);
-      await this._clientInterruptAssistantReplay();
+      await this._clientInterruptAgentReplay();
     }
   }
 
   async triggerUserTurnFinished(): Promise<void> {
     if (this.pushToTalkActive) {
       this.pushToTalkActive = false;
+      this._setUserSpeaking(false);
       this._wsSend({ type: 'trigger.turn.end', role: 'user' } as ClientTriggerTurnMessage);
     }
   }
 
   async sendClientResponseText(text: string): Promise<void> {
-    await this._clientInterruptAssistantReplay();
+    await this._clientInterruptAgentReplay();
     this._wsSend({ type: 'client.response.text', content: text } as ClientResponseTextMessage);
   }
 
@@ -433,25 +455,33 @@ class LayercodeClient implements ILayercodeClient {
       }
 
       switch (message.type) {
-        case 'turn.start':
-          // Sent from the server to this client when a new user turn is detected
+        case 'turn.start': {
+          // Sent from the server to this client when a new turn is detected
           if (message.role === 'assistant') {
-            // Start tracking new assistant turn
-            console.debug('Assistant turn started, will track new turn ID from audio/text');
-            this._setAssistantSpeaking(true);
+            // Start tracking new agent turn
+            console.debug('Agent turn started, will track new turn ID from audio/text');
+            this._setAgentSpeaking(true);
+            this._setUserSpeaking(false);
           } else if (message.role === 'user' && !this.pushToTalkEnabled) {
-            // Interrupt any playing assistant audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
-            console.debug('interrupting assistant audio, as user turn has started and pushToTalkEnabled is false');
-            await this._clientInterruptAssistantReplay();
-            this._setAssistantSpeaking(false);
+            // Interrupt any playing agent audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
+            console.debug('interrupting agent audio, as user turn has started and pushToTalkEnabled is false');
+            await this._clientInterruptAgentReplay();
+            this._setAgentSpeaking(false);
+            this._setUserSpeaking(true);
           } else if (message.role === 'user') {
-            this._setAssistantSpeaking(false);
+            this._setAgentSpeaking(false);
+            this._setUserSpeaking(true);
           }
-          this.options.onMessage(message);
+          this.options.onMessage({
+            ...message,
+            agentSpeaking: this.agentIsSpeaking,
+            userSpeaking: this.userIsSpeaking,
+          });
           break;
+        }
 
         case 'response.audio':
-          this._setAssistantSpeaking(true);
+          this._setAgentSpeaking(true);
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
 
@@ -472,17 +502,26 @@ class LayercodeClient implements ILayercodeClient {
             this.currentTurnId = message.turn_id;
             console.debug(`Setting current turn ID to: ${message.turn_id} from text message`);
           }
-          this.options.onMessage(message);
+          this.options.onMessage({
+            ...message,
+            agentSpeaking: this.agentIsSpeaking,
+          });
           break;
 
         case 'response.data':
-          this.options.onDataMessage(message);
+          this.options.onDataMessage({
+            ...message,
+            agentSpeaking: this.agentIsSpeaking,
+          });
           break;
 
         case 'user.transcript':
         case 'user.transcript.delta':
         case 'user.transcript.interim_delta':
-          this.options.onMessage(message);
+          this.options.onMessage({
+            ...message,
+            userSpeaking: this.userIsSpeaking,
+          });
           break;
 
         default:
@@ -663,6 +702,14 @@ class LayercodeClient implements ILayercodeClient {
     return this.audioInput;
   }
 
+  get userSpeaking(): boolean {
+    return this.userIsSpeaking;
+  }
+
+  get agentSpeaking(): boolean {
+    return this.agentIsSpeaking;
+  }
+
   /**
    * Connects to the Layercode agent using the stored conversation ID and starts the audio conversation
    * @async
@@ -804,7 +851,8 @@ class LayercodeClient implements ILayercodeClient {
 
   private _resetTurnTracking(): void {
     this.currentTurnId = null;
-    this._setAssistantSpeaking(false);
+    this._setAgentSpeaking(false);
+    this._setUserSpeaking(false);
     console.debug('Reset turn tracking state');
   }
 
@@ -928,6 +976,7 @@ class LayercodeClient implements ILayercodeClient {
       this.vad.destroy();
       this.vad = null;
     }
+    this._setUserSpeaking(false);
   }
   /**
    * Reinitializes VAD with a new stream (used after device switching)
