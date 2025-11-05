@@ -108,7 +108,7 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
-  setAudioInput(state: boolean): void;
+  setAudioInput(state: boolean): Promise<void>;
   listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   mute(): void;
   unmute(): void;
@@ -621,20 +621,21 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _setupAmplitudeMonitoring(source: WavRecorder | WavStreamPlayer, callback: (amplitude: number) => void, updateInternalState: (amplitude: number) => void): void {
     let updateCounter = 0;
-    const shouldEmit = this.options.enableAmplitudeMonitoring;
 
-    source.startAmplitudeMonitoring((amplitude: number) => {
-      // Only update and call callback at the specified sample rate
-      if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
-        const value = shouldEmit ? amplitude : 0;
-        updateInternalState(value);
-        if (shouldEmit && callback !== NOOP) {
-          callback(value);
+    if (this.options.enableAmplitudeMonitoring) {
+      source.startAmplitudeMonitoring((amplitude: number) => {
+        if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
+          updateInternalState(amplitude);
+          if (callback !== NOOP) {
+            callback(amplitude);
+          }
+          updateCounter = 0;
         }
-        updateCounter = 0; // Reset counter after sampling
-      }
-      updateCounter++;
-    });
+        updateCounter++;
+      });
+    } else {
+      updateInternalState(0);
+    }
 
     const stop = () => source.stopAmplitudeMonitoring?.();
     if (source === this.wavPlayer) {
@@ -642,10 +643,6 @@ class LayercodeClient implements ILayercodeClient {
     }
     if (source === this.wavRecorder) {
       this.stopRecorderAmplitude = stop;
-    }
-
-    if (!shouldEmit) {
-      updateInternalState(0);
     }
   }
 
@@ -843,10 +840,12 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private async connectToAudioInput() {
-    if (this.audioInput) {
-      await this.wavRecorder.requestPermission();
-      this._setupDeviceChangeListener();
+    if (!this.audioInput) {
+      await this.audioInputDisconnect();
+      return;
     }
+
+    await this.audioInputConnect();
   }
 
   private _resetTurnTracking(): void {
@@ -923,6 +922,9 @@ class LayercodeClient implements ILayercodeClient {
   private async _restartAudioRecording(): Promise<void> {
     try {
       console.debug('Restarting audio recording after device switch...');
+      // Stop amplitude monitoring tied to the previous recording session before tearing it down
+      this.stopRecorderAmplitude?.();
+      this.stopRecorderAmplitude = undefined;
       try {
         await this.wavRecorder.end();
       } catch {
