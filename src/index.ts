@@ -48,6 +48,10 @@ type AuthorizeSessionRequest = (params: AuthorizeSessionRequestParams) => Promis
 
 const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
+const AGENT_SPEAK_START_THRESHOLD = 0.05;
+const AGENT_SPEAK_STOP_THRESHOLD = 0.03;
+const AGENT_SPEAK_START_FRAMES = 1;
+const AGENT_SPEAK_STOP_FRAMES = 3;
 
 // SDK version - updated when publishing
 const SDK_VERSION = '2.2.1';
@@ -111,6 +115,7 @@ interface ILayercodeClient {
   listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   mute(): void;
   unmute(): void;
+  setAudioInput(enabled: boolean): void;
   sendClientResponseText(text: string): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
@@ -153,6 +158,12 @@ interface LayercodeClientOptions {
   onUserAmplitudeChange?: (amplitude: number) => void;
   /** Callback for agent audio amplitude changes */
   onAgentAmplitudeChange?: (amplitude: number) => void;
+  /** Callback when agent speaking state changes */
+  onAgentSpeakingChange?: (isSpeaking: boolean) => void;
+  /** Whether microphone capture should start automatically */
+  audioInput?: boolean;
+  /** Callback when audio input toggles */
+  audioInputChanged?: (audioInput: boolean) => void;
   /** Callback when connection status changes */
   onStatusChange?: (status: string) => void;
   /** Callback when user turn changes */
@@ -178,6 +189,10 @@ class LayercodeClient implements ILayercodeClient {
   private pushToTalkEnabled: boolean;
   private canInterrupt: boolean;
   private userIsSpeaking: boolean;
+  private audioInputEnabled: boolean;
+  private agentIsSpeaking = false;
+  private agentLoudFrames = 0;
+  private agentQuietFrames = 0;
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
@@ -191,6 +206,8 @@ class LayercodeClient implements ILayercodeClient {
   private stopPlayerAmplitude?: () => void;
   private stopRecorderAmplitude?: () => void;
   private deviceChangeListener: ((devices: any[]) => Promise<void>) | null;
+  private audioPipelineSetup: Promise<void> | null;
+  private restartAudioRecordingPromise: Promise<void> | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -219,6 +236,9 @@ class LayercodeClient implements ILayercodeClient {
       onMessage: options.onMessage ?? NOOP,
       onUserAmplitudeChange: options.onUserAmplitudeChange ?? NOOP,
       onAgentAmplitudeChange: options.onAgentAmplitudeChange ?? NOOP,
+      onAgentSpeakingChange: options.onAgentSpeakingChange ?? NOOP,
+      audioInput: options.audioInput ?? true,
+      audioInputChanged: options.audioInputChanged ?? NOOP,
       onStatusChange: options.onStatusChange ?? NOOP,
       onUserIsSpeakingChange: options.onUserIsSpeakingChange ?? NOOP,
       onMuteStateChange: options.onMuteStateChange ?? NOOP,
@@ -242,6 +262,7 @@ class LayercodeClient implements ILayercodeClient {
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
+    this.audioInputEnabled = this.options.audioInput;
     this.recorderStarted = false;
     this.readySent = false;
     this.currentTurnId = null;
@@ -255,6 +276,8 @@ class LayercodeClient implements ILayercodeClient {
     this.stopPlayerAmplitude = undefined;
     this.stopRecorderAmplitude = undefined;
     this.deviceChangeListener = null;
+    this.audioPipelineSetup = null;
+    this.restartAudioRecordingPromise = null;
     // this.audioPauseTime = null;
 
     // Bind event handlers
@@ -266,7 +289,7 @@ class LayercodeClient implements ILayercodeClient {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode, we don't need to use the VAD model
-    if (this.pushToTalkEnabled) {
+    if (this.pushToTalkEnabled || this.isMuted) {
       return;
     }
 
@@ -546,23 +569,43 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _setupAmplitudeMonitoring(source: WavRecorder | WavStreamPlayer, callback: (amplitude: number) => void, updateInternalState: (amplitude: number) => void): void {
     let updateCounter = 0;
-    source.startAmplitudeMonitoring((amplitude: number) => {
-      // Only update and call callback at the specified sample rate
-      if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
-        updateInternalState(amplitude);
-        if (callback !== NOOP) {
-          callback(amplitude);
+
+    if (source === this.wavPlayer) {
+      this._resetAgentSpeakingTracking();
+    }
+
+    try {
+      source.startAmplitudeMonitoring((amplitude: number) => {
+        // Only update and call callback at the specified sample rate
+        if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
+          updateInternalState(amplitude);
+          if (source === this.wavPlayer) {
+            this._updateAgentSpeaking(amplitude);
+          }
+          if (callback !== NOOP) {
+            callback(amplitude);
+          }
+          updateCounter = 0; // Reset counter after sampling
         }
-        updateCounter = 0; // Reset counter after sampling
+        updateCounter++;
+      });
+    } catch (error) {
+      console.warn('Failed to start amplitude monitoring', error);
+      if (source === this.wavPlayer) {
+        this._resetAgentSpeakingTracking();
+      } else {
+        updateInternalState(0);
+        if (callback !== NOOP) {
+          callback(0);
+        }
       }
-      updateCounter++;
-    });
+      return;
+    }
 
     const stop = () => source.stopAmplitudeMonitoring?.();
     if (source === this.wavPlayer) {
       this.stopPlayerAmplitude = stop;
-    }
-    if (source === this.wavRecorder) {
+    } else if (source === this.wavRecorder) {
       this.stopRecorderAmplitude = stop;
     }
   }
@@ -572,6 +615,74 @@ class LayercodeClient implements ILayercodeClient {
     this.stopRecorderAmplitude?.();
     this.stopPlayerAmplitude = undefined;
     this.stopRecorderAmplitude = undefined;
+
+    this._resetAgentSpeakingTracking();
+  }
+
+  private async _ensureAudioInputPipeline(): Promise<void> {
+    if (!this.audioInputEnabled) {
+      return;
+    }
+
+    if (this.audioPipelineSetup) {
+      await this.audioPipelineSetup;
+      return;
+    }
+
+    const setup = (async () => {
+      try {
+        await this.wavRecorder.requestPermission();
+        this._setupDeviceChangeListener();
+
+        if (!this.recorderStarted) {
+          await this._restartAudioRecording();
+        } else {
+          this._startRecorderAmplitudeMonitoring();
+          if (!this.pushToTalkEnabled && this.vadConfig?.enabled !== false && !this.vad) {
+            this._initializeVAD();
+          }
+        }
+      } finally {
+        this.audioPipelineSetup = null;
+      }
+    })();
+
+    this.audioPipelineSetup = setup;
+    await setup;
+  }
+
+  private async _suspendAudioInputPipeline(): Promise<void> {
+    if (this.audioPipelineSetup) {
+      try {
+        await this.audioPipelineSetup;
+      } catch (error) {
+        console.warn('Audio pipeline setup failed prior to suspension:', error);
+      }
+    }
+
+    if (this.restartAudioRecordingPromise) {
+      try {
+        await this.restartAudioRecordingPromise;
+      } catch (error) {
+        console.warn('Audio restart failed prior to suspension:', error);
+      }
+    }
+
+    this._stopRecorderAmplitudeMonitoring();
+    this._stopVad();
+    this.audioBuffer = [];
+
+    this.activeDeviceId = null;
+    this._teardownDeviceListeners();
+
+    if (this.recorderStarted) {
+      try {
+        await this.wavRecorder.end();
+      } catch (error) {
+        console.warn('Error stopping audio recorder:', error);
+      }
+      this.recorderStarted = false;
+    }
   }
 
   /**
@@ -624,15 +735,6 @@ class LayercodeClient implements ILayercodeClient {
       this.conversationId = authorizeSessionResponseBody.conversation_id; // Save the conversation_id for use in future reconnects
       this.options.conversationId = this.conversationId;
 
-      await this.wavRecorder.requestPermission();
-      this._setupDeviceChangeListener();
-
-      // Connect WebSocket
-      this.ws = new WebSocket(
-        `${this._websocketUrl}?${new URLSearchParams({
-          client_session_key: authorizeSessionResponseBody.client_session_key,
-        })}`
-      );
       const config: AgentConfig = authorizeSessionResponseBody.config;
       console.log('AgentConfig', config);
 
@@ -648,12 +750,43 @@ class LayercodeClient implements ILayercodeClient {
         throw new Error(`Unknown trigger: ${config.transcription.trigger}`);
       }
 
+      if (this.audioInputEnabled) {
+        try {
+          await this._ensureAudioInputPipeline();
+        } catch (inputError) {
+          console.error('Failed to initialize audio input pipeline:', inputError);
+          this.audioInputEnabled = false;
+          this.options.audioInput = false;
+          this.options.audioInputChanged(false);
+          this.options.onError(inputError instanceof Error ? inputError : new Error(String(inputError)));
+        }
+      } else {
+        await this._suspendAudioInputPipeline();
+      }
+
+      // Connect WebSocket
+      this.ws = new WebSocket(
+        `${this._websocketUrl}?${new URLSearchParams({
+          client_session_key: authorizeSessionResponseBody.client_session_key,
+        })}`
+      );
+
       // Bind the websocket message callbacks
       this.ws.onmessage = this._handleWebSocketMessage;
       this.ws.onopen = () => {
         console.log('WebSocket connection established');
         this._setStatus('connected');
         this.options.onConnect({ conversationId: this.conversationId, config });
+
+        if (this.audioInputEnabled && !this.recorderStarted) {
+          this._ensureAudioInputPipeline().catch((error) => {
+            console.error('Failed to enable audio input pipeline after connect:', error);
+            this.audioInputEnabled = false;
+            this.options.audioInput = false;
+            this.options.audioInputChanged(false);
+            this.options.onError(error instanceof Error ? error : new Error(String(error)));
+          });
+        }
 
         // Attempt to send ready message if recorder already started
         this._sendReadyIfNeeded();
@@ -690,6 +823,47 @@ class LayercodeClient implements ILayercodeClient {
   private _resetTurnTracking(): void {
     this.currentTurnId = null;
     console.debug('Reset turn tracking state');
+  }
+
+  private _resetAgentSpeakingTracking(options: { notify?: boolean } = {}): void {
+    const { notify = false } = options;
+    this.agentLoudFrames = 0;
+    this.agentQuietFrames = 0;
+
+    if (this.agentIsSpeaking) {
+      this.agentIsSpeaking = false;
+      if (notify) {
+        this.options.onAgentSpeakingChange(false);
+      }
+    } else if (notify && this.options.onAgentSpeakingChange !== NOOP) {
+      this.options.onAgentSpeakingChange(false);
+    }
+  }
+
+  private _updateAgentSpeaking(amplitude: number): void {
+    if (amplitude >= AGENT_SPEAK_START_THRESHOLD) {
+      this.agentLoudFrames += 1;
+      this.agentQuietFrames = 0;
+
+      if (!this.agentIsSpeaking && this.agentLoudFrames >= AGENT_SPEAK_START_FRAMES) {
+        this.agentIsSpeaking = true;
+        this.options.onAgentSpeakingChange(true);
+      }
+      return;
+    }
+
+    if (amplitude <= AGENT_SPEAK_STOP_THRESHOLD) {
+      this.agentQuietFrames += 1;
+      this.agentLoudFrames = 0;
+
+      if (this.agentIsSpeaking && this.agentQuietFrames >= AGENT_SPEAK_STOP_FRAMES) {
+        this.agentIsSpeaking = false;
+        this.options.onAgentSpeakingChange(false);
+      }
+      return;
+    }
+
+    this.agentLoudFrames = 0;
   }
 
   async disconnect(): Promise<void> {
@@ -745,7 +919,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -757,8 +931,34 @@ class LayercodeClient implements ILayercodeClient {
    * Restarts audio recording after a device switch to ensure audio is captured from the new device
    */
   private async _restartAudioRecording(): Promise<void> {
+    if (this.restartAudioRecordingPromise) {
+      return this.restartAudioRecordingPromise;
+    }
+
+    const self = this;
+    let task: Promise<void>;
+    task = (async () => {
+      try {
+        await self._performAudioRecordingRestart();
+      } finally {
+        if (self.restartAudioRecordingPromise === task) {
+          self.restartAudioRecordingPromise = null;
+        }
+      }
+    })();
+
+    this.restartAudioRecordingPromise = task;
+    return task;
+  }
+
+  private async _performAudioRecordingRestart(): Promise<void> {
     try {
       console.debug('Restarting audio recording after device switch...');
+      try {
+        await this.wavRecorder.pause();
+      } catch {
+        // Ignore if not recording yet
+      }
       try {
         await this.wavRecorder.end();
       } catch {
@@ -785,7 +985,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
@@ -797,6 +997,19 @@ class LayercodeClient implements ILayercodeClient {
     } catch (error) {
       console.error('Error restarting audio recording after device switch:', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+  private _stopVad() {
+    if (this.vad) {
+      this.vad.pause();
+      this.vad.destroy();
+      this.vad = null;
+    }
+
+    if (this.userIsSpeaking) {
+      this.userIsSpeaking = false;
+      this.options.onUserIsSpeakingChange(false);
     }
   }
 
@@ -805,11 +1018,7 @@ class LayercodeClient implements ILayercodeClient {
    */
   private async _reinitializeVAD(stream: MediaStream | null): Promise<void> {
     // Clean up existing VAD
-    if (this.vad) {
-      this.vad.pause();
-      this.vad.destroy();
-      this.vad = null;
-    }
+    this._stopVad();
 
     // Reinitialize with new stream
     if (stream) {
@@ -888,6 +1097,7 @@ class LayercodeClient implements ILayercodeClient {
 
     this._stopAmplitudeMonitoring();
     this._teardownDeviceListeners();
+    this._resetAgentSpeakingTracking({ notify: true });
 
     if (this.vad) {
       this.vad.pause();
@@ -929,26 +1139,96 @@ class LayercodeClient implements ILayercodeClient {
     return null;
   }
 
+  private _stopRecorderAmplitudeMonitoring(): void {
+    if (this.stopRecorderAmplitude) {
+      this.stopRecorderAmplitude();
+      this.stopRecorderAmplitude = undefined;
+    }
+    this.userAudioAmplitude = 0;
+    if (this.options.onUserAmplitudeChange !== NOOP) {
+      this.options.onUserAmplitudeChange(0);
+    }
+  }
+
+  private _startRecorderAmplitudeMonitoring(): void {
+    if (!this.audioInputEnabled || this.stopRecorderAmplitude || !this.recorderStarted) {
+      return;
+    }
+
+    this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => {
+      this.userAudioAmplitude = amp;
+    });
+  }
+
   /**
    * Mutes the microphone to stop sending audio to the server
    * The connection and recording remain active for quick unmute
    */
   mute(): void {
-    if (!this.isMuted) {
-      this.isMuted = true;
-      console.log('Microphone muted');
-      this.options.onMuteStateChange(true);
+    if (this.isMuted) {
+      return;
     }
+
+    this.isMuted = true;
+    console.log('Microphone muted');
+
+    this._stopVad();
+
+    this.userIsSpeaking = false;
+    this.options.onUserIsSpeakingChange(false);
+    this.audioBuffer = [];
+
+    this._stopRecorderAmplitudeMonitoring();
+
+    this.options.onMuteStateChange(true);
   }
 
   /**
    * Unmutes the microphone to resume sending audio to the server
    */
   unmute(): void {
-    if (this.isMuted) {
-      this.isMuted = false;
-      console.log('Microphone unmuted');
-      this.options.onMuteStateChange(false);
+    if (!this.isMuted) {
+      return;
+    }
+
+    this.isMuted = false;
+    console.log('Microphone unmuted');
+
+    if (!this.vad) {
+      this._initializeVAD();
+    } else {
+      this.vad.start();
+    }
+
+    this._startRecorderAmplitudeMonitoring();
+
+    this.options.onMuteStateChange(false);
+  }
+
+  setAudioInput(enabled: boolean): void {
+    if (enabled === this.audioInputEnabled) {
+      return;
+    }
+
+    this.audioInputEnabled = enabled;
+    this.options.audioInput = enabled;
+    this.options.audioInputChanged(enabled);
+
+    if (enabled) {
+      if (this.status === 'connected' || (this.status === 'connecting' && this.vadConfig !== null)) {
+        this._ensureAudioInputPipeline().catch((error) => {
+          console.error('Failed to enable audio input pipeline:', error);
+          this.audioInputEnabled = false;
+          this.options.audioInput = false;
+          this.options.audioInputChanged(false);
+          this.options.onError(error instanceof Error ? error : new Error(String(error)));
+        });
+      }
+    } else {
+      this._suspendAudioInputPipeline().catch((error) => {
+        console.error('Failed to disable audio input pipeline:', error);
+        this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      });
     }
   }
 }
