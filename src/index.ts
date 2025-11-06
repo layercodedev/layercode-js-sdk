@@ -287,8 +287,8 @@ class LayercodeClient implements ILayercodeClient {
   private _initializeVAD(): void {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
-    // If we're in push to talk mode, we don't need to use the VAD model
-    if (this.pushToTalkEnabled) {
+    // If we're in push to talk mode or mute mode, we don't need to use the VAD model
+    if (this.pushToTalkEnabled || this.isMuted) {
       return;
     }
 
@@ -1112,6 +1112,7 @@ class LayercodeClient implements ILayercodeClient {
       this.isMuted = true;
       console.log('Microphone muted');
       this.options.onMuteStateChange(true);
+      this.stopVad();
     }
   }
 
@@ -1123,6 +1124,7 @@ class LayercodeClient implements ILayercodeClient {
       this.isMuted = false;
       console.log('Microphone unmuted');
       this.options.onMuteStateChange(false);
+      this._initializeVAD();
     }
   }
 }
