@@ -906,7 +906,7 @@ class LayercodeClient implements ILayercodeClient {
       if (shouldUseVAD) {
         console.debug('Reinitializing VAD with new audio stream');
         const newStream = this.wavRecorder.getStream();
-        await this._initializeVAD();
+        await this._reinitializeVAD(newStream);
       }
       const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
