@@ -109,6 +109,7 @@ interface ILayercodeClient {
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
   setAudioInput(state: boolean): Promise<void>;
+  setAudioOutput(state: boolean): Promise<void>;
   listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   mute(): void;
   unmute(): void;
@@ -138,8 +139,12 @@ interface LayercodeClientOptions {
   metadata?: Record<string, any>;
   /** Whether audio input is enabled. I.e. is the microphone turned on in the browser */
   audioInput?: boolean;
+  /** Whether audio output is enabled. I.e. do we play the sound in the browser client */
+  audioOutput?: boolean;
   /** Fired when audio input flag changes */
   audioInputChanged?: (audioInput: boolean) => void;
+  /** Fired when audio output flag changes */
+  audioOutputChanged?: (audioInput: boolean) => void;
   /** Milliseconds before resuming agent audio after temporary pause due to user interruption (which was actually a false interruption) */
   vadResumeDelay?: number;
   /** Callback when connection is established */
@@ -185,6 +190,7 @@ class LayercodeClient implements ILayercodeClient {
   private vad: MicVAD | null;
   private ws: WebSocket | null;
   private audioInput: boolean;
+  private audioOutput: boolean;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private pushToTalkActive: boolean;
   private pushToTalkEnabled: boolean;
@@ -225,6 +231,8 @@ class LayercodeClient implements ILayercodeClient {
       vadResumeDelay: options.vadResumeDelay ?? 500,
       audioInput: options.audioInput ?? true,
       audioInputChanged: options.audioInputChanged ?? NOOP,
+      audioOutput: options.audioOutput ?? true,
+      audioOutputChanged: options.audioOutputChanged ?? NOOP,
       onConnect: options.onConnect ?? NOOP,
       onDisconnect: options.onDisconnect ?? NOOP,
       onError: options.onError ?? NOOP,
@@ -242,6 +250,7 @@ class LayercodeClient implements ILayercodeClient {
     };
 
     this.audioInput = options.audioInput ?? true;
+    this.audioOutput = options.audioOutput ?? true;
 
     this._emitAudioInput();
 
@@ -482,6 +491,7 @@ class LayercodeClient implements ILayercodeClient {
 
         case 'response.audio':
           this._setAgentSpeaking(true);
+
           const audioBuffer = base64ToArrayBuffer(message.content);
           this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
 
@@ -689,10 +699,25 @@ class LayercodeClient implements ILayercodeClient {
       }
     }
   }
+  async setAudioOutput(state: boolean): Promise<void> {
+    if (this.audioOutput !== state) {
+      this.audioOutput = state;
+      this._emitAudioOutput();
+      if (state) {
+        this.wavPlayer.unmute();
+      } else {
+        this.wavPlayer.mute();
+      }
+    }
+  }
 
   /** Emitters for audio flags */
   private _emitAudioInput(): void {
     this.options.audioInputChanged(this.audioInput);
+  }
+
+  private _emitAudioOutput(): void {
+    this.options.audioOutputChanged(this.audioOutput);
   }
 
   get audioInputEnabled(): boolean {
@@ -836,6 +861,11 @@ class LayercodeClient implements ILayercodeClient {
     this._setupAmplitudeMonitoring(this.wavPlayer, this.options.onAgentAmplitudeChange, (amp) => (this.agentAudioAmplitude = amp));
     if (!this.options.enableAmplitudeMonitoring) {
       this.agentAudioAmplitude = 0;
+    }
+    if (this.audioOutput) {
+      this.wavPlayer.unmute();
+    } else {
+      this.wavPlayer.mute();
     }
   }
 
