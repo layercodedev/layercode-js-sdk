@@ -12,6 +12,7 @@ import {
   ClientTriggerResponseAudioReplayFinishedMessage,
   ClientVadEventsMessage,
   ClientResponseTextMessage,
+  ClientResponseDataMessage,
 } from './interfaces.js';
 
 export interface AgentConfig {
@@ -441,6 +442,10 @@ class LayercodeClient implements ILayercodeClient {
   async sendClientResponseText(text: string): Promise<void> {
     await this._clientInterruptAgentReplay();
     this._wsSend({ type: 'client.response.text', content: text } as ClientResponseTextMessage);
+  }
+
+  async sendClientResponseData(data: any): Promise<void> {
+    this._wsSend({ type: 'client.response.data', data: data } as ClientResponseDataMessage);
   }
 
   /**
