@@ -27,6 +27,8 @@ export class WavStreamPlayer {
   pause(): Promise<true>;
   play(): Promise<true>;
   stop(): void;
+  mute(): void;
+  unmute(): void;
   add16BitPCM(buffer: ArrayBuffer | Int16Array, trackId?: string): Int16Array;
   interrupt(): Promise<{
     trackId: string | null;

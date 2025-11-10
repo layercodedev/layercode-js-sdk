@@ -16,12 +16,37 @@ export class WavStreamPlayer {
     this.sampleRate = sampleRate;
     this.context = null;
     this.stream = null;
+    this.gainNode = null;
     this.analyser = null;
     this.trackSampleOffsets = {};
     this.interruptedTrackIds = {};
     this.finishedPlayingCallback = finishedPlayingCallback;
     this.isPlaying = false;
     this.amplitudeMonitorRaf = undefined;
+    this.muted = false;
+  }
+
+  _ensureGainNode() {
+    if (!this.context) {
+      return null;
+    }
+    if (!this.gainNode) {
+      this.gainNode = this.context.createGain();
+      this._applyGain();
+    }
+    return this.gainNode;
+  }
+
+  _applyGain() {
+    if (!this.gainNode || !this.context) {
+      return;
+    }
+    const target = this.muted ? 0 : 1;
+    try {
+      this.gainNode.gain.setTargetAtTime(target, this.context.currentTime, 0.01);
+    } catch {
+      this.gainNode.gain.value = target;
+    }
   }
 
   /**
@@ -61,6 +86,7 @@ export class WavStreamPlayer {
     analyser.fftSize = 8192;
     analyser.smoothingTimeConstant = 0.1;
     this.analyser = analyser;
+    this._ensureGainNode();
     this.isPlaying = true;
     return true;
   }
@@ -130,12 +156,19 @@ export class WavStreamPlayer {
    */
   _start() {
     const streamNode = new AudioWorkletNode(this.context, "stream_processor");
-    streamNode.connect(this.context.destination);
+    const gainNode = this._ensureGainNode();
+    if (!gainNode) {
+      throw new Error("GainNode not initialized");
+    }
     streamNode.port.onmessage = (e) => {
       const { event } = e.data;
       if (event === "stop") {
         streamNode.disconnect();
+        gainNode.disconnect();
         this.stream = null;
+        if (this.analyser) {
+          this.analyser.disconnect();
+        }
         this.isPlaying = false;
         this.finishedPlayingCallback();
       } else if (event === "offset") {
@@ -144,8 +177,15 @@ export class WavStreamPlayer {
         this.trackSampleOffsets[requestId] = { trackId, offset, currentTime };
       }
     };
-    this.analyser.disconnect();
-    streamNode.connect(this.analyser);
+    if (this.analyser) {
+      this.analyser.disconnect();
+      streamNode.connect(gainNode);
+      gainNode.connect(this.analyser);
+      this.analyser.connect(this.context.destination);
+    } else {
+      streamNode.connect(gainNode);
+      gainNode.connect(this.context.destination);
+    }
     this.stream = streamNode;
     this.isPlaying = true;
     return true;
@@ -275,6 +315,16 @@ export class WavStreamPlayer {
     }
   }
 
+  mute() {
+    this.muted = true;
+    this._applyGain();
+  }
+
+  unmute() {
+    this.muted = false;
+    this._applyGain();
+  }
+
   /**
    * Disconnects the audio context and cleans up resources
    * @returns {void}
@@ -284,6 +334,11 @@ export class WavStreamPlayer {
     if (this.stream) {
       this.stream.disconnect();
       this.stream = null;
+    }
+
+    if (this.gainNode) {
+      this.gainNode.disconnect();
+      this.gainNode = null;
     }
 
     if (this.analyser) {
