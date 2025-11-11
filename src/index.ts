@@ -662,10 +662,29 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _stopAmplitudeMonitoring(): void {
-    this.stopPlayerAmplitude?.();
-    this.stopRecorderAmplitude?.();
-    this.stopPlayerAmplitude = undefined;
-    this.stopRecorderAmplitude = undefined;
+    this._stopPlayerAmplitudeMonitoring();
+    this._stopRecorderAmplitudeMonitoring();
+  }
+
+  private _stopPlayerAmplitudeMonitoring(): void {
+    this.agentAudioAmplitude = 0;
+    if (this.options.enableAmplitudeMonitoring && this.options.onAgentAmplitudeChange !== NOOP) {
+      this.options.onAgentAmplitudeChange(0);
+    }
+    if (this.stopPlayerAmplitude) {
+      this.stopPlayerAmplitude?.();
+      this.stopPlayerAmplitude = undefined;
+    }
+  }
+  private _stopRecorderAmplitudeMonitoring(): void {
+    this.userAudioAmplitude = 0;
+    if (this.options.enableAmplitudeMonitoring && this.options.onUserAmplitudeChange !== NOOP) {
+      this.options.onUserAmplitudeChange(0);
+    }
+    if (this.stopRecorderAmplitude) {
+      this.stopRecorderAmplitude?.();
+      this.stopRecorderAmplitude = undefined;
+    }
   }
 
   async audioInputConnect(): Promise<void> {
@@ -678,7 +697,7 @@ class LayercodeClient implements ILayercodeClient {
   async audioInputDisconnect(): Promise<void> {
     try {
       // stop amplitude monitoring tied to the recorder
-      this.stopRecorderAmplitude?.();
+      this._stopRecorderAmplitudeMonitoring();
       // Try a graceful stop; end() already stops tracks and closes the AudioContext
       await this.wavRecorder.end();
       this.stopVad();
@@ -958,8 +977,7 @@ class LayercodeClient implements ILayercodeClient {
     try {
       console.debug('Restarting audio recording after device switch...');
       // Stop amplitude monitoring tied to the previous recording session before tearing it down
-      this.stopRecorderAmplitude?.();
-      this.stopRecorderAmplitude = undefined;
+      this._stopRecorderAmplitudeMonitoring();
       try {
         await this.wavRecorder.end();
       } catch {
@@ -1148,6 +1166,7 @@ class LayercodeClient implements ILayercodeClient {
       console.log('Microphone muted');
       this.options.onMuteStateChange(true);
       this.stopVad();
+      this._stopRecorderAmplitudeMonitoring();
     }
   }
 
@@ -1160,6 +1179,9 @@ class LayercodeClient implements ILayercodeClient {
       console.log('Microphone unmuted');
       this.options.onMuteStateChange(false);
       this._initializeVAD();
+      if (this.stopRecorderAmplitude === undefined) {
+        this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+      }
     }
   }
 }
