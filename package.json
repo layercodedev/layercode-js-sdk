@@ -45,7 +45,7 @@
     "typescript": "^5.8.2"
   },
   "dependencies": {
-    "@ricky0123/vad-web": "^0.0.24",
-    "onnxruntime-web": "^1.21.1"
+    "@ricky0123/vad-web": "^0.0.29",
+    "onnxruntime-web": "^1.23.2"
   }
 }

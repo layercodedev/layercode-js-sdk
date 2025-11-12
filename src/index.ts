@@ -51,7 +51,7 @@ const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
-const SDK_VERSION = '2.2.1';
+const SDK_VERSION = '2.7.0';
 
 // const ORT_WARNING_MUTE_LEVEL: NonNullable<typeof ortEnv.logLevel> = 'error';
 // try {
@@ -311,6 +311,8 @@ class LayercodeClient implements ILayercodeClient {
     // Build VAD configuration object, only including keys that are defined
     const vadOptions: any = {
       stream: this.wavRecorder.getStream() || undefined,
+      onnxWASMBasePath: 'https://assets.layercode.com/onnxruntime-web/1.23.2/',
+      baseAssetPath: 'https://assets.layercode.com/vad-web/0.0.29/',
       onSpeechStart: () => {
         console.debug('onSpeechStart: sending vad_start');
         this._setUserSpeaking(true);
@@ -779,11 +781,12 @@ class LayercodeClient implements ILayercodeClient {
       await this.connectToAudioInput();
 
       // Connect WebSocket
-      this.ws = new WebSocket(
+      const ws = new WebSocket(
         `${this._websocketUrl}?${new URLSearchParams({
           client_session_key: authorizeSessionResponseBody.client_session_key,
         })}`
       );
+      this.ws = ws;
       const config: AgentConfig = authorizeSessionResponseBody.config;
       console.log('AgentConfig', config);
 
@@ -791,7 +794,7 @@ class LayercodeClient implements ILayercodeClient {
       this.setupVadConfig(config);
 
       // Bind the websocket message callbacks
-      this.bindWebsocketMessageCallbacks(config);
+      this.bindWebsocketMessageCallbacks(ws, config);
 
       await this.setupAudioOutput();
     } catch (error) {
@@ -801,9 +804,9 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  private bindWebsocketMessageCallbacks(config: AgentConfig) {
-    this.ws.onmessage = this._handleWebSocketMessage;
-    this.ws.onopen = () => {
+  private bindWebsocketMessageCallbacks(ws: WebSocket, config: AgentConfig) {
+    ws.onmessage = this._handleWebSocketMessage;
+    ws.onopen = () => {
       console.log('WebSocket connection established');
       this._setStatus('connected');
       this.options.onConnect({ conversationId: this.conversationId, config });
@@ -811,7 +814,7 @@ class LayercodeClient implements ILayercodeClient {
       // Attempt to send ready message if recorder already started
       this._sendReadyIfNeeded();
     };
-    this.ws.onclose = () => {
+    ws.onclose = () => {
       console.log('WebSocket connection closed');
       this.ws = null;
       this._performDisconnectCleanup().catch((error) => {
@@ -819,7 +822,7 @@ class LayercodeClient implements ILayercodeClient {
         this.options.onError(error instanceof Error ? error : new Error(String(error)));
       });
     };
-    this.ws.onerror = (error: Event) => {
+    ws.onerror = (error: Event) => {
       console.error('WebSocket error:', error);
       this._setStatus('error');
       this.options.onError(new Error('WebSocket connection error'));
