@@ -252,7 +252,6 @@ export class WavRecorder {
    */
   async requestPermission() {
     try {
-      console.log('ensureUserMediaAccess');
       await navigator.mediaDevices.getUserMedia({
         audio: true,
       });

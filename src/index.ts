@@ -2,6 +2,8 @@
 // import { env as ortEnv } from 'onnxruntime-web';
 // @ts-ignore - VAD package does not provide TypeScript types
 import { MicVAD } from '@ricky0123/vad-web';
+// @ts-ignore - VAD package does not provide TypeScript types
+import { log as vadInternalLog } from '@ricky0123/vad-web/dist/logging.js';
 import Denque from 'denque';
 import PQueue from 'p-queue';
 import { throttle } from 'throttle-debounce';
@@ -63,6 +65,11 @@ const SDK_VERSION = '2.7.0';
 const log = createDebug('layercode:client');
 const warn = createDebug('layercode:client:warn');
 const logError = createDebug('layercode:client:error');
+const suppressibleVadLog = vadInternalLog as { debug?: (...args: any[]) => void; warn?: (...args: any[]) => void };
+if (suppressibleVadLog) {
+  suppressibleVadLog.debug = NOOP;
+  suppressibleVadLog.warn = NOOP;
+}
 
 const VadConfigSchema = z
   .object({
@@ -584,6 +591,13 @@ class LayercodeClient implements ILayercodeClient {
       stream: recorderStream,
       onnxWASMBasePath: 'https://assets.layercode.com/onnxruntime-web/1.23.2/',
       baseAssetPath: 'https://assets.layercode.com/vad-web/0.0.29/',
+      ortConfig: (ort: any) => {
+        ort.env.logLevel = 'error';
+        if (typeof crossOriginIsolated !== 'undefined' && !crossOriginIsolated && ort?.env?.wasm) {
+          ort.env.wasm.numThreads = 1;
+          ort.env.wasm.simd = false;
+        }
+      },
       onSpeechStart: () => {
         log('onSpeechStart: sending vad_start');
         this._setUserSpeaking(true);
