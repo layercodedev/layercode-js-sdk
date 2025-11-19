@@ -69,7 +69,7 @@ export interface ClientTriggerResponseAudioReplayFinishedMessage extends BaseLay
 export interface ServerTurnMessage extends BaseLayercodeMessage {
   type: 'turn.start';
   role: 'user' | 'assistant'; // Note assistant role events are not currently implemented
-  // turn_id: string; // TODO refactor our agents to allow turn_id to be included here
+  turn_id?: string;
 }
 
 export interface ServerResponseAudioMessage extends BaseLayercodeMessage {
