@@ -2,8 +2,15 @@
 // import { env as ortEnv } from 'onnxruntime-web';
 // @ts-ignore - VAD package does not provide TypeScript types
 import { MicVAD } from '@ricky0123/vad-web';
+import Denque from 'denque';
+import PQueue from 'p-queue';
+import { throttle } from 'throttle-debounce';
+import ReconnectingWebSocket from 'reconnecting-websocket';
+import { defu } from 'defu';
+import createDebug from 'debug';
+import { fromByteArray, toByteArray } from 'base64-js';
+import { z } from 'zod';
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
-import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
 import {
   ClientMessage,
   ServerMessage,
@@ -52,6 +59,70 @@ const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
 const SDK_VERSION = '2.7.0';
+
+const log = createDebug('layercode:client');
+const warn = createDebug('layercode:client:warn');
+const logError = createDebug('layercode:client:error');
+
+const VadConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    gate_audio: z.boolean().optional(),
+    buffer_frames: z.number().optional(),
+    model: z.string().optional(),
+    positive_speech_threshold: z.number().optional(),
+    negative_speech_threshold: z.number().optional(),
+    redemption_frames: z.number().optional(),
+    min_speech_frames: z.number().optional(),
+    pre_speech_pad_frames: z.number().optional(),
+    frame_samples: z.number().optional(),
+  })
+  .partial();
+
+const BaseServerMessageSchema = z.object({
+  event_id: z.string().optional(),
+});
+
+const ServerMessageSchema = z.discriminatedUnion('type', [
+  BaseServerMessageSchema.extend({
+    type: z.literal('turn.start'),
+    role: z.enum(['user', 'assistant']),
+    turn_id: z.string().optional(),
+  }),
+  BaseServerMessageSchema.extend({
+    type: z.literal('response.audio'),
+    content: z.string(),
+    delta_id: z.string().optional(),
+    turn_id: z.string(),
+  }),
+  BaseServerMessageSchema.extend({
+    type: z.literal('response.text'),
+    content: z.string(),
+    turn_id: z.string(),
+  }),
+  BaseServerMessageSchema.extend({
+    type: z.literal('response.data'),
+    content: z.any(),
+    turn_id: z.string(),
+  }),
+  BaseServerMessageSchema.extend({
+    type: z.literal('user.transcript.interim_delta'),
+    content: z.string(),
+    turn_id: z.string(),
+    delta_counter: z.number(),
+  }),
+  BaseServerMessageSchema.extend({
+    type: z.literal('user.transcript.delta'),
+    content: z.string(),
+    turn_id: z.string(),
+    delta_counter: z.number(),
+  }),
+  BaseServerMessageSchema.extend({
+    type: z.literal('user.transcript'),
+    content: z.string(),
+    turn_id: z.string(),
+  }),
+]);
 
 export type LayercodeAudioInputDevice = (MediaDeviceInfo & { default: boolean }) & {
   label: string;
@@ -175,15 +246,19 @@ export const watchAudioInputDevices = (callback: (devices: LayercodeAudioInputDe
         lastSignature = signature;
         callback(devices);
       }
-    } catch (error) {
+    } catch (error: unknown) {
       if (!disposed) {
-        console.warn('Failed to refresh audio devices', error);
+        warn('Failed to refresh audio devices %O', error);
       }
     }
   };
 
-  const handler = (): void => {
+  const throttledEmit = throttle(200, () => {
     void emitDevices();
+  });
+
+  const handler = (): void => {
+    throttledEmit();
   };
 
   const mediaDevices = navigator.mediaDevices;
@@ -206,6 +281,7 @@ export const watchAudioInputDevices = (callback: (devices: LayercodeAudioInputDe
 
   return () => {
     disposed = true;
+    throttledEmit.cancel?.();
     teardown?.();
   };
 };
@@ -350,7 +426,7 @@ class LayercodeClient implements ILayercodeClient {
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
   private vad: MicVAD | null;
-  private ws: WebSocket | null;
+  private ws: ReconnectingWebSocket | null;
   private audioInput: boolean;
   private audioOutput: boolean;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
@@ -362,7 +438,7 @@ class LayercodeClient implements ILayercodeClient {
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
-  private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
+  private audioBuffer: Denque<string>; // Buffer to catch audio just before VAD triggers
   private vadConfig: AgentConfig['vad'] | null;
   private deviceId: string | null = null;
   private activeDeviceId: string | null;
@@ -373,9 +449,10 @@ class LayercodeClient implements ILayercodeClient {
   private stopRecorderAmplitude?: () => void;
   private deviceChangeListener: ((devices: any[]) => Promise<void>) | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
-  private recorderRestartChain: Promise<void>;
+  private recorderRestartQueue: PQueue;
   private deviceListenerReady: Promise<void> | null;
   private resolveDeviceListenerReady: (() => void) | null;
+  private intentionalDisconnect: boolean;
   _websocketUrl: string;
   status: string;
   userAudioAmplitude: number;
@@ -387,37 +464,35 @@ class LayercodeClient implements ILayercodeClient {
    * @param {Object} options - Configuration options
    */
   constructor(options: LayercodeClientOptions) {
-    this.options = {
-      agentId: options.agentId,
-      conversationId: options.conversationId ?? null,
-      authorizeSessionEndpoint: options.authorizeSessionEndpoint,
-      authorizeSessionRequest: options.authorizeSessionRequest,
-      metadata: options.metadata ?? {},
-      vadResumeDelay: options.vadResumeDelay ?? 500,
-      audioInput: options.audioInput ?? true,
-      audioInputChanged: options.audioInputChanged ?? NOOP,
-      audioOutput: options.audioOutput ?? true,
-      audioOutputChanged: options.audioOutputChanged ?? NOOP,
-      onConnect: options.onConnect ?? NOOP,
-      onDisconnect: options.onDisconnect ?? NOOP,
-      onError: options.onError ?? NOOP,
-      onDeviceSwitched: options.onDeviceSwitched ?? NOOP,
-      onDevicesChanged: options.onDevicesChanged ?? NOOP,
-      onDataMessage: options.onDataMessage ?? NOOP,
-      onMessage: options.onMessage ?? NOOP,
-      onUserAmplitudeChange: options.onUserAmplitudeChange ?? NOOP,
-      onAgentAmplitudeChange: options.onAgentAmplitudeChange ?? NOOP,
-      onStatusChange: options.onStatusChange ?? NOOP,
-      onUserIsSpeakingChange: options.onUserIsSpeakingChange ?? NOOP,
-      onAgentSpeakingChange: options.onAgentSpeakingChange ?? NOOP,
-      onMuteStateChange: options.onMuteStateChange ?? NOOP,
-      enableAmplitudeMonitoring: options.enableAmplitudeMonitoring ?? true,
-    };
+    this.options = defu(options, {
+      conversationId: null,
+      metadata: {},
+      vadResumeDelay: 500,
+      audioInput: true,
+      audioInputChanged: NOOP,
+      audioOutput: true,
+      audioOutputChanged: NOOP,
+      onConnect: NOOP,
+      onDisconnect: NOOP,
+      onError: NOOP,
+      onDeviceSwitched: NOOP,
+      onDevicesChanged: NOOP,
+      onDataMessage: NOOP,
+      onMessage: NOOP,
+      onUserAmplitudeChange: NOOP,
+      onAgentAmplitudeChange: NOOP,
+      onStatusChange: NOOP,
+      onUserIsSpeakingChange: NOOP,
+      onAgentSpeakingChange: NOOP,
+      onMuteStateChange: NOOP,
+      enableAmplitudeMonitoring: true,
+    }) as NormalizedLayercodeClientOptions;
 
-    this.audioInput = options.audioInput ?? true;
-    this.audioOutput = options.audioOutput ?? true;
+    this.audioInput = this.options.audioInput;
+    this.audioOutput = this.options.audioOutput;
 
     this._emitAudioInput();
+    this._emitAudioOutput();
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 2;
     this._websocketUrl = DEFAULT_WS_URL;
@@ -441,7 +516,7 @@ class LayercodeClient implements ILayercodeClient {
     this.recorderStarted = false;
     this.readySent = false;
     this.currentTurnId = null;
-    this.audioBuffer = [];
+    this.audioBuffer = new Denque();
     this.vadConfig = null;
     this.activeDeviceId = null;
     this.useSystemDefaultDevice = false;
@@ -451,9 +526,10 @@ class LayercodeClient implements ILayercodeClient {
     this.stopPlayerAmplitude = undefined;
     this.stopRecorderAmplitude = undefined;
     this.deviceChangeListener = null;
-    this.recorderRestartChain = Promise.resolve();
+    this.recorderRestartQueue = new PQueue({ concurrency: 1 });
     this.deviceListenerReady = null;
     this.resolveDeviceListenerReady = null;
+    this.intentionalDisconnect = false;
     // this.audioPauseTime = null;
 
     // Bind event handlers
@@ -478,28 +554,28 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _initializeVAD(): void {
-    console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
+    log('initializing VAD %o', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode or mute mode, we don't need to use the VAD model
     if (this.pushToTalkEnabled || !this._shouldCaptureUserAudio()) {
-      console.debug('Skipping VAD init: audio input disabled or muted');
+      log('Skipping VAD init: audio input disabled or muted');
       return;
     }
 
     // Check if VAD is disabled
     if (this.vadConfig?.enabled === false) {
-      console.log('VAD is disabled by backend configuration');
+      log('VAD is disabled by backend configuration');
       return;
     }
 
     if (!this._hasLiveRecorderStream()) {
-      console.debug('Skipping VAD init: recorder stream is not available');
+      log('Skipping VAD init: recorder stream is not available');
       return;
     }
 
     const recorderStream = this.wavRecorder.getStream();
     if (!recorderStream) {
-      console.debug('Skipping VAD init: no recorder stream reference');
+      log('Skipping VAD init: no recorder stream reference');
       return;
     }
 
@@ -509,7 +585,7 @@ class LayercodeClient implements ILayercodeClient {
       onnxWASMBasePath: 'https://assets.layercode.com/onnxruntime-web/1.23.2/',
       baseAssetPath: 'https://assets.layercode.com/vad-web/0.0.29/',
       onSpeechStart: () => {
-        console.debug('onSpeechStart: sending vad_start');
+        log('onSpeechStart: sending vad_start');
         this._setUserSpeaking(true);
         const vadStartMessage: ClientVadEventsMessage = {
           type: 'vad_events',
@@ -522,9 +598,9 @@ class LayercodeClient implements ILayercodeClient {
         });
       },
       onSpeechEnd: () => {
-        console.debug('onSpeechEnd: sending vad_end');
+        log('onSpeechEnd: sending vad_end');
         this._setUserSpeaking(false);
-        this.audioBuffer = []; // Clear buffer on speech end
+        this.audioBuffer.clear(); // Clear buffer on speech end
         const vadEndMessage: ClientVadEventsMessage = {
           type: 'vad_events',
           event: 'vad_end',
@@ -558,16 +634,16 @@ class LayercodeClient implements ILayercodeClient {
       vadOptions.frameSamples = 512; // Required for v5
     }
 
-    console.log('Creating VAD with options:', vadOptions);
+    log('Creating VAD with options %o', vadOptions);
 
     MicVAD.new(vadOptions)
       .then((vad: MicVAD) => {
         this.vad = vad;
         this.vad.start();
-        console.log('VAD started successfully');
+        log('VAD started successfully');
       })
       .catch((error: any) => {
-        console.warn('Error initializing VAD:', error);
+        warn('Error initializing VAD %O', error);
         // Send a message to server indicating VAD failure
         const vadFailureMessage: ClientVadEventsMessage = {
           type: 'vad_events',
@@ -611,7 +687,7 @@ class LayercodeClient implements ILayercodeClient {
    * Handles when agent audio finishes playing
    */
   private _clientResponseAudioReplayFinished(): void {
-    console.debug('clientResponseAudioReplayFinished');
+    log('clientResponseAudioReplayFinished');
     this._setAgentSpeaking(false);
     const replayFinishedMessage: ClientTriggerResponseAudioReplayFinishedMessage = {
       type: 'trigger.response.audio.replay_finished',
@@ -661,9 +737,9 @@ class LayercodeClient implements ILayercodeClient {
    */
   private async _handleWebSocketMessage(event: MessageEvent): Promise<void> {
     try {
-      const message: ServerMessage = JSON.parse(event.data);
+      const message = ServerMessageSchema.parse(JSON.parse(event.data));
       if (message.type !== 'response.audio') {
-        console.debug('msg:', message);
+        log('msg: %o', message);
       }
 
       switch (message.type) {
@@ -671,12 +747,22 @@ class LayercodeClient implements ILayercodeClient {
           // Sent from the server to this client when a new turn is detected
           if (message.role === 'assistant') {
             // Start tracking new agent turn
-            console.debug('Agent turn started, will track new turn ID from audio/text');
+            if (message.turn_id) {
+              log('Agent turn started (turn ID %s), will track new turn ID from turn.start', message.turn_id);
+              if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
+                log('Setting current turn ID to: %s (was: %s)', message.turn_id, this.currentTurnId);
+                this.currentTurnId = message.turn_id;
+                // Clean up interrupted tracks, keeping only the current turn
+                this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
+              }
+            } else {
+              warn('Assistant turn.start received without turn_id – skipping turn tracking updates');
+            }
             this._setAgentSpeaking(true);
             this._setUserSpeaking(false);
           } else if (message.role === 'user' && !this.pushToTalkEnabled) {
             // Interrupt any playing agent audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
-            console.debug('interrupting agent audio, as user turn has started and pushToTalkEnabled is false');
+            log('interrupting agent audio, as user turn has started and pushToTalkEnabled is false');
             await this._clientInterruptAgentReplay();
             this._setAgentSpeaking(false);
             this._setUserSpeaking(true);
@@ -692,28 +778,26 @@ class LayercodeClient implements ILayercodeClient {
           break;
         }
 
-        case 'response.audio':
+        case 'response.audio': {
           this._setAgentSpeaking(true);
 
-          const audioBuffer = base64ToArrayBuffer(message.content);
-          this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
+          const audioBytes = toByteArray(message.content);
+          const audioBuffer = audioBytes.buffer.slice(audioBytes.byteOffset, audioBytes.byteOffset + audioBytes.byteLength);
 
-          // TODO: once we've added turn_id to the turn.start msgs sent from teh server, we should move this currentTurnId switching logic to the turn.start msg case. We can then remove the currentTurnId setting logic from the response.audio and response.text cases.
-          // Set current turn ID from first audio message, or update if different turn
           if (!this.currentTurnId || this.currentTurnId !== message.turn_id) {
-            console.debug(`Setting current turn ID to: ${message.turn_id} (was: ${this.currentTurnId})`);
+            log('Inferring new current turn ID from response.audio: %s (was: %s)', message.turn_id, this.currentTurnId);
             this.currentTurnId = message.turn_id;
-
-            // Clean up interrupted tracks, keeping only the current turn
             this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
           }
+
+          this.wavPlayer.add16BitPCM(audioBuffer as ArrayBuffer, message.turn_id);
           break;
+        }
 
         case 'response.text':
-          // Set turn ID from first text message if not set
           if (!this.currentTurnId) {
             this.currentTurnId = message.turn_id;
-            console.debug(`Setting current turn ID to: ${message.turn_id} from text message`);
+            log('Setting current turn ID to: %s from text message', message.turn_id);
           }
           this.options.onMessage({
             ...message,
@@ -738,10 +822,10 @@ class LayercodeClient implements ILayercodeClient {
           break;
 
         default:
-          console.warn('Unknown message type received:', message);
+          warn('Unknown message type received %o', message);
       }
-    } catch (error) {
-      console.error('Error processing WebSocket message:', error);
+    } catch (error: unknown) {
+      logError('Error processing WebSocket message %O', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -752,7 +836,8 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
-      const base64 = arrayBufferToBase64(data.mono);
+      const monoBuffer = data.mono instanceof Int16Array ? data.mono : new Int16Array(data.mono);
+      const base64 = fromByteArray(new Uint8Array(monoBuffer.buffer));
 
       // Don't send audio if muted
       if (this.isMuted) {
@@ -776,14 +861,14 @@ class LayercodeClient implements ILayercodeClient {
       if (sendAudio) {
         // If we have buffered audio and we're gating, send it first
         if (shouldGateAudio && this.audioBuffer.length > 0) {
-          console.debug(`Sending ${this.audioBuffer.length} buffered audio chunks`);
-          for (const bufferedAudio of this.audioBuffer) {
+          log('Sending %d buffered audio chunks', this.audioBuffer.length);
+          for (const bufferedAudio of this.audioBuffer.toArray()) {
             this._wsSend({
               type: 'client.audio',
               content: bufferedAudio,
             } as ClientAudioMessage);
           }
-          this.audioBuffer = []; // Clear the buffer after sending
+          this.audioBuffer.clear(); // Clear the buffer after sending
         }
 
         // Send the current audio
@@ -796,19 +881,19 @@ class LayercodeClient implements ILayercodeClient {
         this.audioBuffer.push(base64);
 
         // Keep buffer size based on configuration
-        if (this.audioBuffer.length > bufferFrames) {
+        while (this.audioBuffer.length > bufferFrames) {
           this.audioBuffer.shift(); // Remove oldest chunk
         }
       }
-    } catch (error) {
-      console.error('Error processing audio:', error);
+    } catch (error: unknown) {
+      logError('Error processing audio %O', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
   private _wsSend(message: ClientMessage): void {
     if (message.type !== 'client.audio') {
-      console.debug('sent_msg:', message);
+      log('sent_msg: %o', message);
     }
     const messageString = JSON.stringify(message);
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -833,29 +918,35 @@ class LayercodeClient implements ILayercodeClient {
    * @param {(amplitude: number) => void} updateInternalState - Function to update the internal amplitude state.
    */
   private _setupAmplitudeMonitoring(source: WavRecorder | WavStreamPlayer, callback: (amplitude: number) => void, updateInternalState: (amplitude: number) => void): void {
-    let updateCounter = 0;
-
     if (this.options.enableAmplitudeMonitoring) {
-      source.startAmplitudeMonitoring((amplitude: number) => {
-        if (updateCounter >= this.AMPLITUDE_MONITORING_SAMPLE_RATE) {
-          updateInternalState(amplitude);
-          if (callback !== NOOP) {
-            callback(amplitude);
-          }
-          updateCounter = 0;
+      const throttleInterval = Math.max(this.AMPLITUDE_MONITORING_SAMPLE_RATE, 1) * 16;
+      const emitAmplitude = throttle(throttleInterval, (amplitude: number) => {
+        updateInternalState(amplitude);
+        if (callback !== NOOP) {
+          callback(amplitude);
         }
-        updateCounter++;
       });
+      source.startAmplitudeMonitoring((amplitude: number) => {
+        emitAmplitude(amplitude);
+      });
+      const stop = (): void => {
+        emitAmplitude.cancel?.();
+        source.stopAmplitudeMonitoring?.();
+      };
+      if (source === this.wavPlayer) {
+        this.stopPlayerAmplitude = stop;
+      }
+      if (source === this.wavRecorder) {
+        this.stopRecorderAmplitude = stop;
+      }
     } else {
       updateInternalState(0);
-    }
-
-    const stop = () => source.stopAmplitudeMonitoring?.();
-    if (source === this.wavPlayer) {
-      this.stopPlayerAmplitude = stop;
-    }
-    if (source === this.wavRecorder) {
-      this.stopRecorderAmplitude = stop;
+      if (source === this.wavPlayer) {
+        this.stopPlayerAmplitude = () => source.stopAmplitudeMonitoring?.();
+      }
+      if (source === this.wavRecorder) {
+        this.stopRecorderAmplitude = () => source.stopAmplitudeMonitoring?.();
+      }
     }
   }
 
@@ -994,14 +1085,14 @@ class LayercodeClient implements ILayercodeClient {
       await this.connectToAudioInput();
 
       // Connect WebSocket
-      const ws = new WebSocket(
+      const ws = new ReconnectingWebSocket(
         `${this._websocketUrl}?${new URLSearchParams({
           client_session_key: authorizeSessionResponseBody.client_session_key,
         })}`
       );
       this.ws = ws;
       const config: AgentConfig = authorizeSessionResponseBody.config;
-      console.log('AgentConfig', config);
+      log('AgentConfig %o', config);
 
       // Store VAD configuration
       this.setupVadConfig(config);
@@ -1010,33 +1101,43 @@ class LayercodeClient implements ILayercodeClient {
       this.bindWebsocketMessageCallbacks(ws, config);
 
       await this.setupAudioOutput();
-    } catch (error) {
-      console.error('Error connecting to Layercode agent:', error);
+    } catch (error: unknown) {
+      logError('Error connecting to Layercode agent %O', error);
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-  private bindWebsocketMessageCallbacks(ws: WebSocket, config: AgentConfig) {
-    ws.onmessage = this._handleWebSocketMessage;
-    ws.onopen = () => {
-      console.log('WebSocket connection established');
+  private bindWebsocketMessageCallbacks(ws: ReconnectingWebSocket, config: AgentConfig) {
+    ws.addEventListener('message', (event) => {
+      void this._handleWebSocketMessage(event as MessageEvent);
+    });
+    ws.addEventListener('open', () => {
+      log('WebSocket connection established');
+      this.intentionalDisconnect = false;
+      this.readySent = false;
       this._setStatus('connected');
       this.options.onConnect({ conversationId: this.conversationId, config });
 
       // Attempt to send ready message if recorder already started
       this._sendReadyIfNeeded();
-    };
-    ws.onclose = () => {
-      console.log('WebSocket connection closed');
-      this.ws = null;
-      this._performDisconnectCleanup().catch((error) => {
-        console.error('Error during disconnect cleanup:', error);
-        this.options.onError(error instanceof Error ? error : new Error(String(error)));
-      });
-    };
-    ws.onerror = (error: Event) => {
-      console.error('WebSocket error:', error);
+    });
+    ws.addEventListener('close', (event) => {
+      log('WebSocket connection closed %o', event);
+      this.readySent = false;
+
+      if (this.intentionalDisconnect) {
+        this.ws = null;
+        this._performDisconnectCleanup().catch((error) => {
+          logError('Error during disconnect cleanup %O', error);
+          this.options.onError(error instanceof Error ? error : new Error(String(error)));
+        });
+      } else {
+        this._setStatus('connecting');
+      }
+    });
+    ws.onerror = (evt) => {
+      logError('WebSocket error %o', evt);
       this._setStatus('error');
       this.options.onError(new Error('WebSocket connection error'));
     };
@@ -1122,7 +1223,7 @@ class LayercodeClient implements ILayercodeClient {
     this.currentTurnId = null;
     this._setAgentSpeaking(false);
     this._setUserSpeaking(false);
-    console.debug('Reset turn tracking state');
+    log('Reset turn tracking state');
   }
 
   async disconnect(): Promise<void> {
@@ -1130,16 +1231,13 @@ class LayercodeClient implements ILayercodeClient {
       return;
     }
 
-    if (this.ws) {
-      this.ws.onopen = null;
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      this.ws.onmessage = null;
-      this.ws.close();
-      this.ws = null;
-    }
+    this.intentionalDisconnect = true;
 
-    await this._performDisconnectCleanup();
+    if (this.ws) {
+      this.ws.close();
+    } else {
+      await this._performDisconnectCleanup();
+    }
   }
 
   /**
@@ -1168,7 +1266,7 @@ class LayercodeClient implements ILayercodeClient {
     this.deviceId = normalizedDeviceId;
 
     if (!this.audioInput) {
-      console.debug('Audio input disabled; storing preferred device without restarting recorder');
+      log('Audio input disabled; storing preferred device without restarting recorder');
       return;
     }
 
@@ -1179,14 +1277,14 @@ class LayercodeClient implements ILayercodeClient {
       // Reinitialize VAD with the new audio stream if VAD is enabled
       const shouldUseVAD = !this.pushToTalkEnabled && this.vadConfig?.enabled !== false;
       if (shouldUseVAD) {
-        console.debug('Reinitializing VAD with new audio stream');
+        log('Reinitializing VAD with new audio stream');
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
       const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
-      console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
-    } catch (error) {
-      console.error(`Failed to switch to input device ${deviceId}:`, error);
+      log('Successfully switched to input device %s', reportedDeviceId);
+    } catch (error: unknown) {
+      logError('Failed to switch to input device %s %O', deviceId, error);
       throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -1206,11 +1304,11 @@ class LayercodeClient implements ILayercodeClient {
    */
   private async _restartAudioRecording(): Promise<void> {
     if (!this.audioInput) {
-      console.debug('Skipping audio recording restart because audio input is disabled');
+      log('Skipping audio recording restart because audio input is disabled');
       return;
     }
     try {
-      console.debug('Restarting audio recording after device switch...');
+      log('Restarting audio recording after device switch');
       // Stop amplitude monitoring tied to the previous recording session before tearing it down
       this._stopRecorderAmplitudeMonitoring();
       try {
@@ -1250,17 +1348,15 @@ class LayercodeClient implements ILayercodeClient {
         }
       }
 
-      console.debug('Audio recording restart completed successfully');
-    } catch (error) {
-      console.error('Error restarting audio recording after device switch:', error);
+      log('Audio recording restart completed successfully');
+    } catch (error: unknown) {
+      logError('Error restarting audio recording after device switch %O', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
   private _queueRecorderRestart(): Promise<void> {
-    const run = this.recorderRestartChain.then(() => this._restartAudioRecording());
-    this.recorderRestartChain = run.catch(() => {});
-    return run;
+    return this.recorderRestartQueue.add(() => this._restartAudioRecording());
   }
 
   private async _initializeRecorderWithDefaultDevice(): Promise<void> {
@@ -1274,15 +1370,15 @@ class LayercodeClient implements ILayercodeClient {
         await this.deviceChangeListener(devices);
         return;
       }
-      console.warn('No audio input devices available when enabling microphone');
-    } catch (error) {
-      console.warn('Unable to prime audio devices from listDevices()', error);
+      warn('No audio input devices available when enabling microphone');
+    } catch (error: unknown) {
+      warn('Unable to prime audio devices from listDevices() %O', error);
     }
 
     try {
       await this.setInputDevice('default');
-    } catch (error) {
-      console.error('Failed to start recording with the system default device:', error);
+    } catch (error: unknown) {
+      logError('Failed to start recording with the system default device %O', error);
       throw error;
     }
   }
@@ -1361,7 +1457,7 @@ class LayercodeClient implements ILayercodeClient {
           this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
 
           if (shouldSwitch) {
-            console.debug('Selecting audio input device after change');
+            log('Selecting audio input device after change');
 
             let targetDeviceId: string | null = null;
             const preferredDeviceId = this.deviceId;
@@ -1383,10 +1479,10 @@ class LayercodeClient implements ILayercodeClient {
             if (targetDeviceId) {
               await this.setInputDevice(targetDeviceId);
             } else {
-              console.warn('No alternative audio device found');
+              warn('No alternative audio device found');
             }
           }
-        } catch (error) {
+        } catch (error: unknown) {
           this.options.onError(error instanceof Error ? error : new Error(String(error)));
         } finally {
           this.resolveDeviceListenerReady?.();
@@ -1467,7 +1563,7 @@ class LayercodeClient implements ILayercodeClient {
   mute(): void {
     if (!this.isMuted) {
       this.isMuted = true;
-      console.log('Microphone muted');
+      log('Microphone muted');
       this.options.onMuteStateChange(true);
       this.stopVad();
       this._stopRecorderAmplitudeMonitoring();
@@ -1480,7 +1576,7 @@ class LayercodeClient implements ILayercodeClient {
   unmute(): void {
     if (this.isMuted) {
       this.isMuted = false;
-      console.log('Microphone unmuted');
+      log('Microphone unmuted');
       this.options.onMuteStateChange(false);
       if (this.audioInput && this.recorderStarted) {
         this._initializeVAD();
@@ -1488,7 +1584,7 @@ class LayercodeClient implements ILayercodeClient {
           this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
         }
       } else {
-        console.debug('Audio input is disabled or recorder not ready; deferring VAD restart until microphone is active');
+        log('Audio input is disabled or recorder not ready; deferring VAD restart until microphone is active');
       }
     }
   }

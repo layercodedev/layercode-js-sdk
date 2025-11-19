@@ -39,6 +39,8 @@
     "@rollup/plugin-commonjs": "^25.0.0",
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-typescript": "^11.0.0",
+    "@types/debug": "^4.1.12",
+    "@types/throttle-debounce": "^5.0.2",
     "rimraf": "^6.0.1",
     "rollup": "^4.0.0",
     "tslib": "^2.5.0",
@@ -46,6 +48,14 @@
   },
   "dependencies": {
     "@ricky0123/vad-web": "^0.0.29",
-    "onnxruntime-web": "^1.23.2"
+    "base64-js": "^1.5.1",
+    "debug": "^4.3.7",
+    "defu": "^6.1.4",
+    "denque": "^2.1.0",
+    "onnxruntime-web": "^1.23.2",
+    "p-queue": "^8.0.1",
+    "reconnecting-websocket": "^4.4.0",
+    "throttle-debounce": "^5.0.0",
+    "zod": "^3.23.8"
   }
 }
