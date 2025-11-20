@@ -33,6 +33,12 @@ export interface AgentConfig {
     pre_speech_pad_frames?: number;
     frame_samples?: number;
   };
+  client: {
+    sample_rate: number;
+  };
+  response: {
+    sample_rate: number;
+  };
 }
 
 interface AuthorizeSessionRequestParams {
@@ -49,6 +55,8 @@ type AuthorizeSessionRequest = (params: AuthorizeSessionRequestParams) => Promis
 
 const NOOP = () => {};
 const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
+const DEFAULT_CLIENT_SAMPLE_RATE = 8000;
+const DEFAULT_RESPONSE_SAMPLE_RATE = 16000;
 
 // SDK version - updated when publishing
 const SDK_VERSION = '2.7.0';
@@ -349,6 +357,8 @@ class LayercodeClient implements ILayercodeClient {
   private options: NormalizedLayercodeClientOptions;
   private wavRecorder: WavRecorder;
   private wavPlayer: WavStreamPlayer;
+  private clientSampleRate: number;
+  private responseSampleRate: number;
   private vad: MicVAD | null;
   private ws: WebSocket | null;
   private audioInput: boolean;
@@ -421,11 +431,12 @@ class LayercodeClient implements ILayercodeClient {
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 2;
     this._websocketUrl = DEFAULT_WS_URL;
-
-    this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
+    this.clientSampleRate = DEFAULT_CLIENT_SAMPLE_RATE;
+    this.responseSampleRate = DEFAULT_RESPONSE_SAMPLE_RATE;
+    this.wavRecorder = new WavRecorder({ sampleRate: DEFAULT_CLIENT_SAMPLE_RATE });
     this.wavPlayer = new WavStreamPlayer({
       finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
-      sampleRate: 16000, // TODO should be set my fetched agent config
+      sampleRate: DEFAULT_RESPONSE_SAMPLE_RATE,
     });
     this.vad = null;
     this.ws = null;
@@ -885,6 +896,37 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
+  private async applyAgentSampleRates(config: AgentConfig): Promise<void> {
+    const desiredRecorderSampleRate = config?.client?.sample_rate ?? DEFAULT_CLIENT_SAMPLE_RATE;
+    const desiredPlayerSampleRate = config?.response?.sample_rate ?? DEFAULT_RESPONSE_SAMPLE_RATE;
+
+    if (desiredRecorderSampleRate !== this.clientSampleRate) {
+      await this._recreateWavRecorder(desiredRecorderSampleRate);
+    }
+
+    if (desiredPlayerSampleRate !== this.responseSampleRate) {
+      this._recreateWavPlayer(desiredPlayerSampleRate);
+    }
+  }
+
+  private async _recreateWavRecorder(sampleRate: number): Promise<void> {
+    await this.wavRecorder.quit();
+    this.wavRecorder = new WavRecorder({ sampleRate });
+    this.clientSampleRate = sampleRate;
+    this.stopRecorderAmplitude = undefined;
+  }
+
+  private _recreateWavPlayer(sampleRate: number): void {
+    this.wavPlayer.stop?.();
+    this.wavPlayer.disconnect();
+    this.wavPlayer = new WavStreamPlayer({
+      finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
+      sampleRate,
+    });
+    this.responseSampleRate = sampleRate;
+    this.stopPlayerAmplitude = undefined;
+  }
+
   async audioInputConnect(): Promise<void> {
     // Turn mic ON
     await this.wavRecorder.requestPermission();
@@ -990,6 +1032,10 @@ class LayercodeClient implements ILayercodeClient {
 
       // Get conversation key from server
       const authorizeSessionResponseBody = await this.authorizeSession();
+      const config: AgentConfig = authorizeSessionResponseBody.config;
+      console.log('AgentConfig', config);
+
+      await this.applyAgentSampleRates(config);
 
       await this.connectToAudioInput();
 
@@ -1000,8 +1046,6 @@ class LayercodeClient implements ILayercodeClient {
         })}`
       );
       this.ws = ws;
-      const config: AgentConfig = authorizeSessionResponseBody.config;
-      console.log('AgentConfig', config);
 
       // Store VAD configuration
       this.setupVadConfig(config);
