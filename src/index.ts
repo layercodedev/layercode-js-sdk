@@ -1033,7 +1033,6 @@ class LayercodeClient implements ILayercodeClient {
       // Get conversation key from server
       const authorizeSessionResponseBody = await this.authorizeSession();
       const config: AgentConfig = authorizeSessionResponseBody.config;
-      console.log('AgentConfig', config);
 
       await this.applyAgentSampleRates(config);
 
