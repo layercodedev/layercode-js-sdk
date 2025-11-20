@@ -59,7 +59,7 @@ const DEFAULT_CLIENT_SAMPLE_RATE = 8000;
 const DEFAULT_RESPONSE_SAMPLE_RATE = 16000;
 
 // SDK version - updated when publishing
-const SDK_VERSION = '2.7.0';
+const SDK_VERSION = '2.9.0';
 
 export type LayercodeAudioInputDevice = (MediaDeviceInfo & { default: boolean }) & {
   label: string;
