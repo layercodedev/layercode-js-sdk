@@ -354,6 +354,7 @@ class LayercodeClient implements ILayercodeClient {
   private audioInput: boolean;
   private audioOutput: boolean;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
+  private audioOutputReady: Promise<void> | null;
   private pushToTalkActive: boolean;
   private pushToTalkEnabled: boolean;
   private canInterrupt: boolean;
@@ -421,6 +422,7 @@ class LayercodeClient implements ILayercodeClient {
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 2;
     this._websocketUrl = DEFAULT_WS_URL;
+    this.audioOutputReady = null;
 
     this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
     this.wavPlayer = new WavStreamPlayer({
@@ -590,12 +592,20 @@ class LayercodeClient implements ILayercodeClient {
     this.options.onStatusChange(status);
   }
 
-  private _setAgentSpeaking(isSpeaking: boolean): void {
-    if (this.agentIsSpeaking === isSpeaking) {
+  private async _waitForAudioOutputReady(): Promise<void> {
+    if (!this.audioOutputReady) {
       return;
     }
-    this.agentIsSpeaking = isSpeaking;
-    this.options.onAgentSpeakingChange(isSpeaking);
+    await this.audioOutputReady;
+  }
+
+  private _setAgentSpeaking(isSpeaking: boolean): void {
+    const shouldReportSpeaking = this.audioOutput && isSpeaking;
+    if (this.agentIsSpeaking === shouldReportSpeaking) {
+      return;
+    }
+    this.agentIsSpeaking = shouldReportSpeaking;
+    this.options.onAgentSpeakingChange(shouldReportSpeaking);
   }
 
   private _setUserSpeaking(isSpeaking: boolean): void {
@@ -672,7 +682,6 @@ class LayercodeClient implements ILayercodeClient {
           if (message.role === 'assistant') {
             // Start tracking new agent turn
             console.debug('Agent turn started, will track new turn ID from audio/text');
-            this._setAgentSpeaking(true);
             this._setUserSpeaking(false);
           } else if (message.role === 'user' && !this.pushToTalkEnabled) {
             // Interrupt any playing agent audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
@@ -693,6 +702,7 @@ class LayercodeClient implements ILayercodeClient {
         }
 
         case 'response.audio':
+          await this._waitForAudioOutputReady();
           this._setAgentSpeaking(true);
 
           const audioBuffer = base64ToArrayBuffer(message.content);
@@ -933,6 +943,7 @@ class LayercodeClient implements ILayercodeClient {
         this.wavPlayer.unmute();
       } else {
         this.wavPlayer.mute();
+        this._setAgentSpeaking(false);
       }
     }
   }
@@ -1009,7 +1020,9 @@ class LayercodeClient implements ILayercodeClient {
       // Bind the websocket message callbacks
       this.bindWebsocketMessageCallbacks(ws, config);
 
-      await this.setupAudioOutput();
+      const audioOutputReady = this.setupAudioOutput();
+      this.audioOutputReady = audioOutputReady;
+      await audioOutputReady;
     } catch (error) {
       console.error('Error connecting to Layercode agent:', error);
       this._setStatus('error');
