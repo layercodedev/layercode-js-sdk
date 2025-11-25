@@ -360,6 +360,7 @@ class LayercodeClient implements ILayercodeClient {
   private canInterrupt: boolean;
   private userIsSpeaking: boolean;
   private agentIsSpeaking: boolean;
+  private agentIsPlayingAudio: boolean; // Tracks actual audio playback state, independent of audioOutput
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
@@ -440,6 +441,7 @@ class LayercodeClient implements ILayercodeClient {
     this.canInterrupt = false;
     this.userIsSpeaking = false;
     this.agentIsSpeaking = false;
+    this.agentIsPlayingAudio = false;
     this.recorderStarted = false;
     this.readySent = false;
     this.currentTurnId = null;
@@ -600,6 +602,9 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _setAgentSpeaking(isSpeaking: boolean): void {
+    // Track the actual audio playback state regardless of audioOutput setting
+    this.agentIsPlayingAudio = isSpeaking;
+
     const shouldReportSpeaking = this.audioOutput && isSpeaking;
     if (this.agentIsSpeaking === shouldReportSpeaking) {
       return;
@@ -701,12 +706,24 @@ class LayercodeClient implements ILayercodeClient {
           break;
         }
 
-        case 'response.audio':
+        case 'response.audio': {
           await this._waitForAudioOutputReady();
-          this._setAgentSpeaking(true);
 
           const audioBuffer = base64ToArrayBuffer(message.content);
-          this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
+          const hasAudioSamples = audioBuffer.byteLength > 0;
+          let audioEnqueued = false;
+
+          if (hasAudioSamples) {
+            try {
+              const playbackBuffer = this.wavPlayer.add16BitPCM(audioBuffer, message.turn_id);
+              audioEnqueued = Boolean(playbackBuffer && playbackBuffer.length > 0);
+            } catch (error) {
+              this._setAgentSpeaking(false);
+              throw error;
+            }
+          } else {
+            console.debug(`Skipping empty audio response for turn ${message.turn_id}`);
+          }
 
           // TODO: once we've added turn_id to the turn.start msgs sent from teh server, we should move this currentTurnId switching logic to the turn.start msg case. We can then remove the currentTurnId setting logic from the response.audio and response.text cases.
           // Set current turn ID from first audio message, or update if different turn
@@ -717,7 +734,12 @@ class LayercodeClient implements ILayercodeClient {
             // Clean up interrupted tracks, keeping only the current turn
             this.wavPlayer.clearInterruptedTracks(this.currentTurnId ? [this.currentTurnId] : []);
           }
+
+          if (audioEnqueued) {
+            this._setAgentSpeaking(true);
+          }
           break;
+        }
 
         case 'response.text':
           // Set turn ID from first text message if not set
@@ -941,10 +963,24 @@ class LayercodeClient implements ILayercodeClient {
       this._emitAudioOutput();
       if (state) {
         this.wavPlayer.unmute();
+        // Sync agentSpeaking state with actual playback state when enabling audio output
+        this._syncAgentSpeakingState();
       } else {
         this.wavPlayer.mute();
         this._setAgentSpeaking(false);
       }
+    }
+  }
+
+  /**
+   * Syncs the reported agentSpeaking state with the actual audio playback state.
+   * Called when audioOutput is enabled to ensure proper state synchronization.
+   */
+  private _syncAgentSpeakingState(): void {
+    const shouldReportSpeaking = this.audioOutput && this.agentIsPlayingAudio;
+    if (this.agentIsSpeaking !== shouldReportSpeaking) {
+      this.agentIsSpeaking = shouldReportSpeaking;
+      this.options.onAgentSpeakingChange(shouldReportSpeaking);
     }
   }
 
