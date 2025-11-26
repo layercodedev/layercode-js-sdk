@@ -481,6 +481,35 @@ class LayercodeClient implements ILayercodeClient {
     this.options.onDevicesChanged = callback ?? NOOP;
   }
 
+  private _startSpeech(): void {
+    console.debug('onSpeechStart: sending vad_start');
+    this._setUserSpeaking(true);
+    const vadStartMessage: ClientVadEventsMessage = {
+      type: 'vad_events',
+      event: 'vad_start',
+    };
+    this._wsSend(vadStartMessage);
+    this.options.onMessage({
+      ...vadStartMessage,
+      userSpeaking: this.userIsSpeaking,
+    });
+  }
+
+  private _endSpeech(): void {
+    console.debug('onSpeechEnd: sending vad_end');
+    this._setUserSpeaking(false);
+    this.audioBuffer = []; // Clear buffer on speech end
+    const vadEndMessage: ClientVadEventsMessage = {
+      type: 'vad_events',
+      event: 'vad_end',
+    };
+    this._wsSend(vadEndMessage);
+    this.options.onMessage({
+      ...vadEndMessage,
+      userSpeaking: this.userIsSpeaking,
+    });
+  }
+
   private _initializeVAD(): void {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
@@ -513,31 +542,10 @@ class LayercodeClient implements ILayercodeClient {
       onnxWASMBasePath: 'https://assets.layercode.com/onnxruntime-web/1.23.2/',
       baseAssetPath: 'https://assets.layercode.com/vad-web/0.0.29/',
       onSpeechStart: () => {
-        console.debug('onSpeechStart: sending vad_start');
-        this._setUserSpeaking(true);
-        const vadStartMessage: ClientVadEventsMessage = {
-          type: 'vad_events',
-          event: 'vad_start',
-        };
-        this._wsSend(vadStartMessage);
-        this.options.onMessage({
-          ...vadStartMessage,
-          userSpeaking: this.userIsSpeaking,
-        });
+        this._startSpeech();
       },
       onSpeechEnd: () => {
-        console.debug('onSpeechEnd: sending vad_end');
-        this._setUserSpeaking(false);
-        this.audioBuffer = []; // Clear buffer on speech end
-        const vadEndMessage: ClientVadEventsMessage = {
-          type: 'vad_events',
-          event: 'vad_end',
-        };
-        this._wsSend(vadEndMessage);
-        this.options.onMessage({
-          ...vadEndMessage,
-          userSpeaking: this.userIsSpeaking,
-        });
+        this._endSpeech();
       },
     };
 
@@ -1520,6 +1528,7 @@ class LayercodeClient implements ILayercodeClient {
       this.options.onMuteStateChange(true);
       this.stopVad();
       this._stopRecorderAmplitudeMonitoring();
+      // this._endSpeech();
     }
   }
 
