@@ -1023,7 +1023,11 @@ class LayercodeClient implements ILayercodeClient {
         // This happens when audioOutput was initially false and is now being enabled
         if (!this.wavPlayer.context) {
           console.log('setAudioOutput: initializing audio output (no context yet)');
-          await this.setupAudioOutput();
+          // Store the promise so _waitForAudioOutputReady() can await it
+          // This prevents response.audio from running before AudioContext is ready
+          const setupPromise = this.setupAudioOutput();
+          this.audioOutputReady = setupPromise;
+          await setupPromise;
         } else {
           console.log('setAudioOutput: unmuting existing player');
           this.wavPlayer.unmute();
