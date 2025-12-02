@@ -42,6 +42,7 @@ export class WavStreamPlayer {
   getTrackSampleOffset(interrupt?: boolean): Promise<{ trackId: string | null; offset: number; currentTime: number } | null>;
   clearInterruptedTracks(keepTrackIds?: string[]): void;
   isPlaying: boolean;
+  context: AudioContext | null;
 }
 
 export class WavPacker {

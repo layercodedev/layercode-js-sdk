@@ -303,6 +303,13 @@ interface LayercodeClientOptions {
   audioInput?: boolean;
   /** Whether audio output is enabled. I.e. do we play the sound in the browser client */
   audioOutput?: boolean;
+  /**
+   * When true, defers actual audio hardware initialization (AudioContext, mic permissions)
+   * until setAudioInput(true) or setAudioOutput(true) is called.
+   * The server will still be told this is a voice session, but no browser audio APIs are touched until needed.
+   * This avoids Chrome's autoplay policy blocking AudioContext before user gesture.
+   */
+  deferAudioInit?: boolean;
   /** Fired when audio input flag changes */
   audioInputChanged?: (audioInput: boolean) => void;
   /** Fired when audio output flag changes */
@@ -339,7 +346,7 @@ interface LayercodeClientOptions {
   enableAmplitudeMonitoring?: boolean;
 }
 
-type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest'>> & Pick<LayercodeClientOptions, 'authorizeSessionRequest'>;
+type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>> & Pick<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>;
 
 /**
  * @class LayercodeClient
@@ -364,6 +371,7 @@ class LayercodeClient implements ILayercodeClient {
   private recorderStarted: boolean; // Indicates that WavRecorder.record() has been called successfully
   private readySent: boolean; // Ensures we send client.ready only once
   private currentTurnId: string | null; // Track current turn ID
+  private sentReplayFinishedForDisabledOutput: boolean; // Track if we've sent replay_finished when audioOutput is disabled
   private audioBuffer: string[]; // Buffer to catch audio just before VAD triggers
   private vadConfig: AgentConfig['vad'] | null;
   private deviceId: string | null = null;
@@ -445,6 +453,7 @@ class LayercodeClient implements ILayercodeClient {
     this.recorderStarted = false;
     this.readySent = false;
     this.currentTurnId = null;
+    this.sentReplayFinishedForDisabledOutput = false;
     this.audioBuffer = [];
     this.vadConfig = null;
     this.activeDeviceId = null;
@@ -614,11 +623,14 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _setUserSpeaking(isSpeaking: boolean): void {
-    const shouldReportSpeaking = this._shouldCaptureUserAudio() && isSpeaking;
+    const shouldCapture = this._shouldCaptureUserAudio();
+    const shouldReportSpeaking = shouldCapture && isSpeaking;
+    console.log('_setUserSpeaking called:', isSpeaking, 'shouldCapture:', shouldCapture, 'shouldReportSpeaking:', shouldReportSpeaking, 'current userIsSpeaking:', this.userIsSpeaking);
     if (this.userIsSpeaking === shouldReportSpeaking) {
       return;
     }
     this.userIsSpeaking = shouldReportSpeaking;
+    console.log('_setUserSpeaking: updated userIsSpeaking to:', this.userIsSpeaking);
     this.options.onUserIsSpeakingChange(shouldReportSpeaking);
   }
 
@@ -688,6 +700,21 @@ class LayercodeClient implements ILayercodeClient {
             // Start tracking new agent turn
             console.debug('Agent turn started, will track new turn ID from audio/text');
             this._setUserSpeaking(false);
+            // Reset the flag for the new assistant turn
+            this.sentReplayFinishedForDisabledOutput = false;
+
+            // When assistant's turn starts but we're not playing audio,
+            // we need to tell the server we're "done" with playback so it can
+            // transition the turn back to user. Use a small delay to let any
+            // response.audio/response.end messages arrive first.
+            if (!this.audioOutput) {
+              setTimeout(() => {
+                if (!this.audioOutput && !this.sentReplayFinishedForDisabledOutput) {
+                  this.sentReplayFinishedForDisabledOutput = true;
+                  this._clientResponseAudioReplayFinished();
+                }
+              }, 1000);
+            }
           } else if (message.role === 'user' && !this.pushToTalkEnabled) {
             // Interrupt any playing agent audio if this is a turn triggered by the server (and not push to talk, which will have already called interrupt)
             console.debug('interrupting agent audio, as user turn has started and pushToTalkEnabled is false');
@@ -706,7 +733,27 @@ class LayercodeClient implements ILayercodeClient {
           break;
         }
 
+        case 'response.end': {
+          // When audioOutput is disabled, notify server that "playback" is complete
+          if (!this.audioOutput && !this.sentReplayFinishedForDisabledOutput) {
+            this.sentReplayFinishedForDisabledOutput = true;
+            this._clientResponseAudioReplayFinished();
+          }
+          this.options.onMessage?.(message);
+          break;
+        }
+
         case 'response.audio': {
+          // Skip audio playback if audioOutput is disabled
+          if (!this.audioOutput) {
+            // Send replay_finished so server knows we're "done" with playback (only once per turn)
+            if (!this.sentReplayFinishedForDisabledOutput) {
+              this.sentReplayFinishedForDisabledOutput = true;
+              this._clientResponseAudioReplayFinished();
+            }
+            break;
+          }
+
           await this._waitForAudioOutputReady();
 
           const audioBuffer = base64ToArrayBuffer(message.content);
@@ -784,6 +831,7 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
+
       const base64 = arrayBufferToBase64(data.mono);
 
       // Don't send audio if muted
@@ -851,12 +899,16 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _sendReadyIfNeeded(): void {
+    // Send client.ready when either:
+    // 1. Recorder is started (audio mode active)
+    // 2. audioInput is false (text-only mode, but server should still be ready)
     const audioReady = this.recorderStarted || !this.audioInput;
     if (audioReady && this.ws?.readyState === WebSocket.OPEN && !this.readySent) {
       this._wsSend({ type: 'client.ready' } as ClientMessage);
       this.readySent = true;
     }
   }
+
 
   /**
    * Sets up amplitude monitoring for a given audio source.
@@ -919,13 +971,17 @@ class LayercodeClient implements ILayercodeClient {
 
   async audioInputConnect(): Promise<void> {
     // Turn mic ON
+    console.log('audioInputConnect: requesting permission');
     await this.wavRecorder.requestPermission();
+    console.log('audioInputConnect: setting up device change listener');
     await this._setupDeviceChangeListener();
 
     // If the recorder hasn't spun up yet, proactively select a device.
     if (!this.recorderStarted && this.deviceChangeListener) {
+      console.log('audioInputConnect: initializing recorder with default device');
       await this._initializeRecorderWithDefaultDevice();
     }
+    console.log('audioInputConnect: done, recorderStarted =', this.recorderStarted);
   }
 
   async audioInputDisconnect(): Promise<void> {
@@ -958,11 +1014,24 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
   async setAudioOutput(state: boolean): Promise<void> {
+    console.log('setAudioOutput called with state:', state, 'current:', this.audioOutput);
     if (this.audioOutput !== state) {
       this.audioOutput = state;
       this._emitAudioOutput();
       if (state) {
-        this.wavPlayer.unmute();
+        // Initialize audio output if not already connected
+        // This happens when audioOutput was initially false and is now being enabled
+        if (!this.wavPlayer.context) {
+          console.log('setAudioOutput: initializing audio output (no context yet)');
+          // Store the promise so _waitForAudioOutputReady() can await it
+          // This prevents response.audio from running before AudioContext is ready
+          const setupPromise = this.setupAudioOutput();
+          this.audioOutputReady = setupPromise;
+          await setupPromise;
+        } else {
+          console.log('setAudioOutput: unmuting existing player');
+          this.wavPlayer.unmute();
+        }
         // Sync agentSpeaking state with actual playback state when enabling audio output
         this._syncAgentSpeakingState();
       } else {
@@ -1141,6 +1210,12 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private async setupAudioOutput() {
+    // Only initialize audio player if audioOutput is enabled
+    // This prevents AudioContext creation before user gesture when audio is disabled
+    if (!this.audioOutput) {
+      return;
+    }
+
     // Initialize audio player
     // wavRecorder will be started from the onDeviceSwitched callback,
     // which is called when the device is first initialized and also when the device is switched
@@ -1151,11 +1226,7 @@ class LayercodeClient implements ILayercodeClient {
     if (!this.options.enableAmplitudeMonitoring) {
       this.agentAudioAmplitude = 0;
     }
-    if (this.audioOutput) {
-      this.wavPlayer.unmute();
-    } else {
-      this.wavPlayer.mute();
-    }
+    this.wavPlayer.unmute();
   }
 
   private async connectToAudioInput() {
@@ -1212,6 +1283,7 @@ class LayercodeClient implements ILayercodeClient {
    * @param {string} deviceId - The deviceId of the new microphone
    */
   async setInputDevice(deviceId: string): Promise<void> {
+    console.log('setInputDevice called with:', deviceId, 'audioInput:', this.audioInput);
     const normalizedDeviceId = !deviceId || deviceId === 'default' ? null : deviceId;
     this.useSystemDefaultDevice = normalizedDeviceId === null;
     this.deviceId = normalizedDeviceId;
@@ -1222,6 +1294,7 @@ class LayercodeClient implements ILayercodeClient {
     }
 
     try {
+      console.log('setInputDevice: calling _queueRecorderRestart');
       // Restart recording with the new device
       await this._queueRecorderRestart();
 
@@ -1313,13 +1386,16 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private async _initializeRecorderWithDefaultDevice(): Promise<void> {
+    console.log('_initializeRecorderWithDefaultDevice called, deviceChangeListener:', !!this.deviceChangeListener);
     if (!this.deviceChangeListener) {
       return;
     }
 
     try {
       const devices = await this.wavRecorder.listDevices();
+      console.log('_initializeRecorderWithDefaultDevice: got devices:', devices.length);
       if (devices.length) {
+        console.log('_initializeRecorderWithDefaultDevice: calling deviceChangeListener');
         await this.deviceChangeListener(devices);
         return;
       }
@@ -1329,6 +1405,7 @@ class LayercodeClient implements ILayercodeClient {
     }
 
     try {
+      console.log('_initializeRecorderWithDefaultDevice: calling setInputDevice default');
       await this.setInputDevice('default');
     } catch (error) {
       console.error('Failed to start recording with the system default device:', error);
@@ -1378,6 +1455,7 @@ class LayercodeClient implements ILayercodeClient {
       });
 
       this.deviceChangeListener = async (devices: any[]) => {
+        console.log('deviceChangeListener called, devices:', devices.length, 'recorderStarted:', this.recorderStarted);
         try {
           // Notify user that devices have changed
           this.options.onDevicesChanged(devices);
@@ -1388,6 +1466,7 @@ class LayercodeClient implements ILayercodeClient {
           const currentDefaultDeviceKey = this._getDeviceComparisonKey(defaultDevice);
 
           let shouldSwitch = !this.recorderStarted;
+          console.log('deviceChangeListener: shouldSwitch initial:', shouldSwitch);
 
           if (!shouldSwitch) {
             if (usingDefaultDevice) {
@@ -1409,6 +1488,7 @@ class LayercodeClient implements ILayercodeClient {
 
           this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
 
+          console.log('deviceChangeListener: final shouldSwitch:', shouldSwitch);
           if (shouldSwitch) {
             console.debug('Selecting audio input device after change');
 

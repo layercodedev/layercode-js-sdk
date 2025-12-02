@@ -14,6 +14,7 @@ export type LayercodeMessageType =
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
   | 'response.data' // Webhook event forwarded by server to client
+  | 'response.end' // Signals end of assistant response
   | 'user.transcript.interim_delta' // Interial partial user transcript text that will updated as confidance in the transcription increases
   | 'user.transcript.delta' // Partial user transcript text as it's transcribed
   | 'user.transcript'; // Final user transcript text at end of user turn
@@ -123,19 +124,17 @@ export interface ServerResponseUserTranscript extends BaseLayercodeMessage {
 //   turn_id: string;
 // }
 
-// export interface ResponseEndMessage extends BaseLayercodeMessage {
-//   type: 'response.end';
-//   turn_id: string;
-// }
-
-// Create a discriminated union to differentiate between webhook and server messages
-// export type WebhookMessage = WebhookResponseTTSMessage | WebhookResponseDataMessage | ResponseEndMessage;
+export interface ServerResponseEndMessage extends BaseLayercodeMessage {
+  type: 'response.end';
+  turn_id: string;
+}
 
 export type ServerMessage =
   | ServerTurnMessage
   | ServerResponseAudioMessage
   | ServerResponseTextMessage
   | ServerResponseDataMessage
+  | ServerResponseEndMessage
   | ServerResponseUserTranscriptInterimDelta
   | ServerResponseUserTranscriptDelta
   | ServerResponseUserTranscript;
