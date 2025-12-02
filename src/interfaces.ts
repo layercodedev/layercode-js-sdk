@@ -6,7 +6,6 @@ export type LayercodeMessageType =
   | 'trigger.response.audio.replay_finished'
   | 'vad_events'
   | 'client.ready'
-  | 'client.session.update'
   | 'client.response.text'
   | 'client.response.data'
 
@@ -59,12 +58,6 @@ export interface ClientVadEventsMessage extends BaseLayercodeMessage {
 
 export interface ClientReadyMessage extends BaseLayercodeMessage {
   type: 'client.ready';
-}
-
-export interface ClientSessionUpdateMessage extends BaseLayercodeMessage {
-  type: 'client.session.update';
-  audio_input: boolean;
-  audio_output: boolean;
 }
 
 export interface ClientTriggerResponseAudioReplayFinishedMessage extends BaseLayercodeMessage {
@@ -152,7 +145,6 @@ export type ClientMessage =
   | ClientTriggerResponseAudioReplayFinishedMessage
   | ClientVadEventsMessage
   | ClientReadyMessage
-  | ClientSessionUpdateMessage
   | ClientResponseTextMessage
   | ClientResponseDataMessage;
 

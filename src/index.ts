@@ -13,7 +13,6 @@ import {
   ClientVadEventsMessage,
   ClientResponseTextMessage,
   ClientResponseDataMessage,
-  ClientSessionUpdateMessage,
 } from './interfaces.js';
 
 export interface AgentConfig {
@@ -910,21 +909,6 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-  /**
-   * Sends a session update message to notify the server of audio mode changes.
-   * This is called when audioInput or audioOutput is enabled after the session started.
-   */
-  private _sendSessionUpdate(): void {
-    if (this.ws?.readyState === WebSocket.OPEN && this.readySent) {
-      const sessionUpdateMessage: ClientSessionUpdateMessage = {
-        type: 'client.session.update',
-        audio_input: this.audioInput,
-        audio_output: this.audioOutput,
-      };
-      console.log('Sending session update:', sessionUpdateMessage);
-      this._wsSend(sessionUpdateMessage);
-    }
-  }
 
   /**
    * Sets up amplitude monitoring for a given audio source.
@@ -1024,8 +1008,6 @@ class LayercodeClient implements ILayercodeClient {
 
       if (state) {
         await this.audioInputConnect();
-        // Notify server that audio mode is now enabled
-        this._sendSessionUpdate();
       } else {
         await this.audioInputDisconnect();
       }
@@ -1048,8 +1030,6 @@ class LayercodeClient implements ILayercodeClient {
         }
         // Sync agentSpeaking state with actual playback state when enabling audio output
         this._syncAgentSpeakingState();
-        // Notify server that audio output mode is now enabled
-        this._sendSessionUpdate();
       } else {
         this.wavPlayer.mute();
         this._setAgentSpeaking(false);
