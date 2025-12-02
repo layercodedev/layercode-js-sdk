@@ -346,7 +346,8 @@ interface LayercodeClientOptions {
   enableAmplitudeMonitoring?: boolean;
 }
 
-type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>> & Pick<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>;
+type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>> &
+  Pick<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>;
 
 /**
  * @class LayercodeClient
@@ -624,7 +625,16 @@ class LayercodeClient implements ILayercodeClient {
   private _setUserSpeaking(isSpeaking: boolean): void {
     const shouldCapture = this._shouldCaptureUserAudio();
     const shouldReportSpeaking = shouldCapture && isSpeaking;
-    console.log('_setUserSpeaking called:', isSpeaking, 'shouldCapture:', shouldCapture, 'shouldReportSpeaking:', shouldReportSpeaking, 'current userIsSpeaking:', this.userIsSpeaking);
+    console.log(
+      '_setUserSpeaking called:',
+      isSpeaking,
+      'shouldCapture:',
+      shouldCapture,
+      'shouldReportSpeaking:',
+      shouldReportSpeaking,
+      'current userIsSpeaking:',
+      this.userIsSpeaking
+    );
     if (this.userIsSpeaking === shouldReportSpeaking) {
       return;
     }
@@ -830,7 +840,6 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
-
       const base64 = arrayBufferToBase64(data.mono);
 
       // Don't send audio if muted
@@ -907,7 +916,6 @@ class LayercodeClient implements ILayercodeClient {
       this.readySent = true;
     }
   }
-
 
   /**
    * Sets up amplitude monitoring for a given audio source.
@@ -1305,7 +1313,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -1364,7 +1372,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
