@@ -251,13 +251,15 @@ export class WavRecorder {
    * @returns {Promise<true>}
    */
   async requestPermission() {
+    console.log('ensureUserMediaAccess');
     try {
-      console.log('ensureUserMediaAccess');
-      await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
       });
+      // Stop the tracks immediately after getting permission
+      stream.getTracks().forEach(track => track.stop());
     } catch (fallbackError) {
-      window.alert('You must grant microphone access to use this feature.');
+      console.error('getUserMedia failed:', fallbackError.name, fallbackError.message);
       throw fallbackError;
     }
     return true;
