@@ -39,6 +39,9 @@ export class WavRecorder {
     this.analyser = null;
     this.recording = false;
     this.contextSampleRate = sampleRate;
+    // Track whether we've already obtained microphone permission
+    // This avoids redundant getUserMedia calls which are expensive on iOS Safari
+    this._hasPermission = false;
     // Event handling with AudioWorklet
     this._lastEventId = 0;
     this.eventReceipts = {};
@@ -234,9 +237,14 @@ export class WavRecorder {
 
   /**
    * Manually request permission to use the microphone
+   * Skips if permission has already been granted to avoid expensive redundant getUserMedia calls
    * @returns {Promise<true>}
    */
   async requestPermission() {
+    // Skip if we already have permission - each getUserMedia is expensive on iOS Safari
+    if (this._hasPermission) {
+      return true;
+    }
     console.log('ensureUserMediaAccess');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -244,6 +252,7 @@ export class WavRecorder {
       });
       // Stop the tracks immediately after getting permission
       stream.getTracks().forEach((track) => track.stop());
+      this._hasPermission = true;
     } catch (fallbackError) {
       console.error('getUserMedia failed:', fallbackError.name, fallbackError.message);
       throw fallbackError;
@@ -309,6 +318,8 @@ export class WavRecorder {
         config.audio.deviceId = { exact: deviceId };
       }
       this.stream = await navigator.mediaDevices.getUserMedia(config);
+      // Mark permission as granted so listDevices() won't call requestPermission() again
+      this._hasPermission = true;
     } catch (err) {
       throw new Error('Could not start media stream');
     }

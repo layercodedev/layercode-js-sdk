@@ -866,17 +866,73 @@ class LayercodeClient implements ILayercodeClient {
 
   async audioInputConnect(): Promise<void> {
     // Turn mic ON
-    console.log('audioInputConnect: requesting permission');
-    await this.wavRecorder.requestPermission();
+    // NOTE: On iOS Safari, each getUserMedia call is expensive (~2-3 seconds).
+    // We optimize by:
+    // 1. Starting the recorder FIRST with begin() (single getUserMedia)
+    // 2. THEN setting up device change listeners (which will skip getUserMedia since permission is cached)
+    console.log('audioInputConnect: recorderStarted =', this.recorderStarted);
+
+    // If the recorder hasn't spun up yet, start it first with the default device
+    // This ensures we only make ONE getUserMedia call instead of multiple sequential ones
+    if (!this.recorderStarted) {
+      console.log('audioInputConnect: starting recorder with default device');
+      await this._startRecorderWithDevice(undefined);
+    }
+
+    // Now set up device change listeners - permission is already granted so listDevices() won't call getUserMedia
     console.log('audioInputConnect: setting up device change listener');
     await this._setupDeviceChangeListener();
 
-    // If the recorder hasn't spun up yet, proactively select a device.
-    if (!this.recorderStarted && this.deviceChangeListener) {
-      console.log('audioInputConnect: initializing recorder with default device');
-      await this._initializeRecorderWithDefaultDevice();
-    }
     console.log('audioInputConnect: done, recorderStarted =', this.recorderStarted);
+  }
+
+  /**
+   * Starts the recorder with a specific device (or default if undefined)
+   * This is the single point where getUserMedia is called during initial setup
+   */
+  private async _startRecorderWithDevice(deviceId: string | undefined): Promise<void> {
+    try {
+      this._stopRecorderAmplitudeMonitoring();
+      try {
+        await this.wavRecorder.end();
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      await this.wavRecorder.begin(deviceId);
+      await this.wavRecorder.record(this._handleDataAvailable, 1638);
+
+      // Re-setup amplitude monitoring with the new stream
+      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+      if (!this.options.enableAmplitudeMonitoring) {
+        this.userAudioAmplitude = 0;
+      }
+
+      const stream = this.wavRecorder.getStream();
+      const activeTrack = stream?.getAudioTracks()[0] || null;
+      const trackSettings = activeTrack && typeof activeTrack.getSettings === 'function' ? activeTrack.getSettings() : null;
+      const trackDeviceId = trackSettings && typeof trackSettings.deviceId === 'string' ? trackSettings.deviceId : null;
+      this.activeDeviceId = trackDeviceId ?? (this.useSystemDefaultDevice ? null : this.deviceId);
+
+      if (!this.recorderStarted) {
+        this.recorderStarted = true;
+        this._sendReadyIfNeeded();
+      }
+
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
+      if (reportedDeviceId !== this.lastReportedDeviceId) {
+        this.lastReportedDeviceId = reportedDeviceId;
+        if (this.options.onDeviceSwitched) {
+          this.options.onDeviceSwitched(reportedDeviceId);
+        }
+      }
+
+      console.debug('Recorder started successfully with device:', reportedDeviceId);
+    } catch (error) {
+      console.error('Error starting recorder:', error);
+      this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
   async audioInputDisconnect(): Promise<void> {
@@ -1279,34 +1335,6 @@ class LayercodeClient implements ILayercodeClient {
     const run = this.recorderRestartChain.then(() => this._restartAudioRecording());
     this.recorderRestartChain = run.catch(() => {});
     return run;
-  }
-
-  private async _initializeRecorderWithDefaultDevice(): Promise<void> {
-    console.log('_initializeRecorderWithDefaultDevice called, deviceChangeListener:', !!this.deviceChangeListener);
-    if (!this.deviceChangeListener) {
-      return;
-    }
-
-    try {
-      const devices = await this.wavRecorder.listDevices();
-      console.log('_initializeRecorderWithDefaultDevice: got devices:', devices.length);
-      if (devices.length) {
-        console.log('_initializeRecorderWithDefaultDevice: calling deviceChangeListener');
-        await this.deviceChangeListener(devices);
-        return;
-      }
-      console.warn('No audio input devices available when enabling microphone');
-    } catch (error) {
-      console.warn('Unable to prime audio devices from listDevices()', error);
-    }
-
-    try {
-      console.log('_initializeRecorderWithDefaultDevice: calling setInputDevice default');
-      await this.setInputDevice('default');
-    } catch (error) {
-      console.error('Failed to start recording with the system default device:', error);
-      throw error;
-    }
   }
 
   /**
