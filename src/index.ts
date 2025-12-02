@@ -273,7 +273,7 @@ interface ILayercodeClient {
   onDeviceSwitched?: (deviceId: string) => void;
   onDevicesChanged?: (devices: Array<MediaDeviceInfo & { default: boolean }>) => void;
   mute(): void;
-  unmute(): void;
+  unmute(): Promise<void>;
   sendClientResponseText(text: string): Promise<void>;
   sendClientResponseData(data: any): Promise<void>;
   readonly status: string;
@@ -490,7 +490,7 @@ class LayercodeClient implements ILayercodeClient {
     this.options.onDevicesChanged = callback ?? NOOP;
   }
 
-  private _initializeVAD(): void {
+  private async _initializeVAD(): Promise<void> {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode or mute mode, we don't need to use the VAD model
@@ -573,25 +573,24 @@ class LayercodeClient implements ILayercodeClient {
 
     console.log('Creating VAD with options:', vadOptions);
 
-    MicVAD.new(vadOptions)
-      .then((vad: MicVAD) => {
-        this.vad = vad;
-        this.vad.start();
-        console.log('VAD started successfully');
-      })
-      .catch((error: any) => {
-        console.warn('Error initializing VAD:', error);
-        // Send a message to server indicating VAD failure
-        const vadFailureMessage: ClientVadEventsMessage = {
-          type: 'vad_events',
-          event: 'vad_model_failed',
-        };
-        this._wsSend(vadFailureMessage);
-        this.options.onMessage({
-          ...vadFailureMessage,
-          userSpeaking: this.userIsSpeaking,
-        });
+    try {
+      const vad = await MicVAD.new(vadOptions);
+      this.vad = vad;
+      this.vad.start();
+      console.log('VAD started successfully');
+    } catch (error: any) {
+      console.warn('Error initializing VAD:', error);
+      // Send a message to server indicating VAD failure
+      const vadFailureMessage: ClientVadEventsMessage = {
+        type: 'vad_events',
+        event: 'vad_model_failed',
+      };
+      this._wsSend(vadFailureMessage);
+      this.options.onMessage({
+        ...vadFailureMessage,
+        userSpeaking: this.userIsSpeaking,
       });
+    }
   }
 
   /**
@@ -1007,14 +1006,15 @@ class LayercodeClient implements ILayercodeClient {
       this._emitAudioInput();
 
       if (state) {
+        this._setStatus('connecting');
         await this.audioInputConnect();
+        this._setStatus('connected');
       } else {
         await this.audioInputDisconnect();
       }
     }
   }
   async setAudioOutput(state: boolean): Promise<void> {
-    console.log('setAudioOutput called with state:', state, 'current:', this.audioOutput);
     if (this.audioOutput !== state) {
       this.audioOutput = state;
       this._emitAudioOutput();
@@ -1022,14 +1022,14 @@ class LayercodeClient implements ILayercodeClient {
         // Initialize audio output if not already connected
         // This happens when audioOutput was initially false and is now being enabled
         if (!this.wavPlayer.context) {
-          console.log('setAudioOutput: initializing audio output (no context yet)');
+          this._setStatus('connecting');
           // Store the promise so _waitForAudioOutputReady() can await it
           // This prevents response.audio from running before AudioContext is ready
           const setupPromise = this.setupAudioOutput();
           this.audioOutputReady = setupPromise;
           await setupPromise;
+          this._setStatus('connected');
         } else {
-          console.log('setAudioOutput: unmuting existing player');
           this.wavPlayer.unmute();
         }
         // Sync agentSpeaking state with actual playback state when enabling audio output
@@ -1431,7 +1431,7 @@ class LayercodeClient implements ILayercodeClient {
     this.stopVad();
     // Reinitialize with new stream only if we're actually capturing audio
     if (stream && this._shouldCaptureUserAudio()) {
-      this._initializeVAD();
+      await this._initializeVAD();
     }
   }
 
@@ -1606,13 +1606,13 @@ class LayercodeClient implements ILayercodeClient {
   /**
    * Unmutes the microphone to resume sending audio to the server
    */
-  unmute(): void {
+  async unmute(): Promise<void> {
     if (this.isMuted) {
       this.isMuted = false;
       console.log('Microphone unmuted');
       this.options.onMuteStateChange(false);
       if (this.audioInput && this.recorderStarted) {
-        this._initializeVAD();
+        await this._initializeVAD();
         if (this.stopRecorderAmplitude === undefined) {
           this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
         }
