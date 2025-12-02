@@ -123,12 +123,13 @@ export class WavRecorder {
 
   /**
    * Logs data in debug mode
-   * @param {...any} arguments
+   * @param {...any} args
    * @returns {true}
    */
-  log() {
+  log(...args) {
     if (this.debug) {
-      this.log(...arguments);
+      // eslint-disable-next-line no-console
+      console.log(...args);
     }
     return true;
   }
