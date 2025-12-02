@@ -109,12 +109,16 @@ interface ILayercodeClient {
   triggerUserTurnFinished(): Promise<void>;
   getStream(): MediaStream | null;
   setInputDevice(deviceId: string): Promise<void>;
+  setPreferredInputDevice(deviceId: string | null): Promise<void>;
   setAudioInput(state: boolean): Promise<void>;
   setAudioOutput(state: boolean): Promise<void>;
   listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
+  onDeviceSwitched?: (deviceId: string) => void;
+  onDevicesChanged?: (devices: Array<MediaDeviceInfo & { default: boolean }>) => void;
   mute(): void;
   unmute(): void;
   sendClientResponseText(text: string): Promise<void>;
+  sendClientResponseData(data: any): Promise<void>;
   readonly status: string;
   readonly userAudioAmplitude: number;
   readonly agentAudioAmplitude: number;
@@ -211,6 +215,9 @@ class LayercodeClient implements ILayercodeClient {
   private stopPlayerAmplitude?: () => void;
   private stopRecorderAmplitude?: () => void;
   private deviceChangeListener: ((devices: any[]) => Promise<void>) | null;
+  private recorderRestartChain: Promise<void>;
+  private deviceListenerReady: Promise<void> | null;
+  private resolveDeviceListenerReady: (() => void) | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   _websocketUrl: string;
   status: string;
@@ -287,6 +294,9 @@ class LayercodeClient implements ILayercodeClient {
     this.stopPlayerAmplitude = undefined;
     this.stopRecorderAmplitude = undefined;
     this.deviceChangeListener = null;
+    this.recorderRestartChain = Promise.resolve();
+    this.deviceListenerReady = null;
+    this.resolveDeviceListenerReady = null;
     // this.audioPauseTime = null;
 
     // Bind event handlers
@@ -294,11 +304,29 @@ class LayercodeClient implements ILayercodeClient {
     this._handleDataAvailable = this._handleDataAvailable.bind(this);
   }
 
+  get onDeviceSwitched() {
+    return this.options.onDeviceSwitched;
+  }
+  set onDeviceSwitched(cb) {
+    this.options.onDeviceSwitched = cb ?? (() => {});
+  }
+
+  get onDevicesChanged() {
+    return this.options.onDevicesChanged;
+  }
+  set onDevicesChanged(cb) {
+    this.options.onDevicesChanged = cb ?? (() => {});
+  }
+
   private _initializeVAD(): void {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
-    // If we're in push to talk mode or mute mode, we don't need to use the VAD model
-    if (this.pushToTalkEnabled || this.isMuted) {
+    // If we're in push to talk mode or shouldn't capture audio, we don't need to use the VAD model
+    if (this.pushToTalkEnabled || !this._shouldCaptureUserAudio()) {
+      return;
+    }
+
+    if (!this._hasLiveRecorderStream()) {
       return;
     }
 
@@ -310,7 +338,7 @@ class LayercodeClient implements ILayercodeClient {
 
     // Build VAD configuration object, only including keys that are defined
     const vadOptions: any = {
-      stream: this.wavRecorder.getStream() || undefined,
+      stream: this.wavRecorder.getStream(),
       onnxWASMBasePath: 'https://assets.layercode.com/onnxruntime-web/1.23.2/',
       baseAssetPath: 'https://assets.layercode.com/vad-web/0.0.29/',
       onSpeechStart: () => {
@@ -404,11 +432,12 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   private _setUserSpeaking(isSpeaking: boolean): void {
-    if (this.userIsSpeaking === isSpeaking) {
+    const next = this._shouldCaptureUserAudio() && isSpeaking;
+    if (this.userIsSpeaking === next) {
       return;
     }
-    this.userIsSpeaking = isSpeaking;
-    this.options.onUserIsSpeakingChange(isSpeaking);
+    this.userIsSpeaking = next;
+    this.options.onUserIsSpeakingChange(next);
   }
 
   /**
@@ -693,7 +722,10 @@ class LayercodeClient implements ILayercodeClient {
     // Turn mic ON
     await this.wavRecorder.requestPermission();
     // Let the device-change listener pick an input and call _restartAudioRecording()
-    this._setupDeviceChangeListener();
+    await this._setupDeviceChangeListener();
+    if (!this.recorderStarted && this.deviceChangeListener) {
+      await this._initializeRecorderWithDefaultDevice();
+    }
   }
 
   async audioInputDisconnect(): Promise<void> {
@@ -744,6 +776,15 @@ class LayercodeClient implements ILayercodeClient {
 
   private _emitAudioOutput(): void {
     this.options.audioOutputChanged(this.audioOutput);
+  }
+
+  private _shouldCaptureUserAudio() {
+    return this.audioInput && !this.isMuted;
+  }
+
+  private _hasLiveRecorderStream() {
+    const s = this.wavRecorder.getStream();
+    return !!s && s.getAudioTracks().some(t => t.readyState === 'live');
   }
 
   get audioInputEnabled(): boolean {
@@ -950,26 +991,19 @@ class LayercodeClient implements ILayercodeClient {
    * @param {string} deviceId - The deviceId of the new microphone
    */
   async setInputDevice(deviceId: string): Promise<void> {
-    try {
-      const normalizedDeviceId = !deviceId || deviceId === 'default' ? null : deviceId;
-      this.useSystemDefaultDevice = normalizedDeviceId === null;
-      this.deviceId = normalizedDeviceId;
+    const normalized = !deviceId || deviceId === 'default' ? null : deviceId;
+    this.useSystemDefaultDevice = normalized === null;
+    this.deviceId = normalized;
+    if (!this.audioInput) return;
+    await this._queueRecorderRestart();
+  }
 
-      // Restart recording with the new device
-      await this._restartAudioRecording();
-
-      // Reinitialize VAD with the new audio stream if VAD is enabled
-      const shouldUseVAD = !this.pushToTalkEnabled && this.vadConfig?.enabled !== false;
-      if (shouldUseVAD) {
-        console.debug('Reinitializing VAD with new audio stream');
-        const newStream = this.wavRecorder.getStream();
-        await this._reinitializeVAD(newStream);
-      }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
-      console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
-    } catch (error) {
-      console.error(`Failed to switch to input device ${deviceId}:`, error);
-      throw new Error(`Failed to switch to input device: ${error instanceof Error ? error.message : String(error)}`);
+  async setPreferredInputDevice(deviceId: string | null): Promise<void> {
+    const normalized = !deviceId || deviceId === 'default' ? null : deviceId;
+    this.useSystemDefaultDevice = normalized === null;
+    this.deviceId = normalized;
+    if (this.recorderStarted) {
+      await this.setInputDevice(normalized ?? 'default');
     }
   }
 
@@ -977,6 +1011,7 @@ class LayercodeClient implements ILayercodeClient {
    * Restarts audio recording after a device switch to ensure audio is captured from the new device
    */
   private async _restartAudioRecording(): Promise<void> {
+    if (!this.audioInput) return;
     try {
       console.debug('Restarting audio recording after device switch...');
       // Stop amplitude monitoring tied to the previous recording session before tearing it down
@@ -1025,6 +1060,24 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
+  private _queueRecorderRestart(): Promise<void> {
+    const run = this.recorderRestartChain.then(() => this._restartAudioRecording());
+    this.recorderRestartChain = run.catch(() => {});
+    return run;
+  }
+
+  private async _initializeRecorderWithDefaultDevice(): Promise<void> {
+    if (!this.deviceChangeListener) return;
+    try {
+      const devices = await this.wavRecorder.listDevices();
+      if (devices.length) {
+        await this.deviceChangeListener(devices);
+        return;
+      }
+    } catch {}
+    await this.setInputDevice('default');
+  }
+
   /**
    * Disconnect VAD
    */
@@ -1050,8 +1103,11 @@ class LayercodeClient implements ILayercodeClient {
   /**
    * Sets up the device change event listener
    */
-  private _setupDeviceChangeListener(): void {
+  private async _setupDeviceChangeListener(): Promise<void> {
     if (!this.deviceChangeListener) {
+      this.deviceListenerReady = new Promise(res => {
+        this.resolveDeviceListenerReady = res;
+      });
       this.deviceChangeListener = async (devices: any[]) => {
         try {
           // Notify user that devices have changed
@@ -1086,25 +1142,34 @@ class LayercodeClient implements ILayercodeClient {
 
           if (shouldSwitch) {
             console.debug('Selecting fallback audio input device');
-            const fallbackDevice = defaultDevice || devices[0];
-            if (fallbackDevice) {
-              const fallbackId = fallbackDevice.default ? 'default' : fallbackDevice.deviceId;
-              await this.setInputDevice(fallbackId);
-            } else {
-              console.warn('No alternative audio device found');
+            let target: string | null = null;
+            if (!this.recorderStarted && !this.useSystemDefaultDevice && this.deviceId) {
+              if (devices.some(d => d.deviceId === this.deviceId)) {
+                target = this.deviceId;
+              }
             }
+            if (!target) {
+              const fb = defaultDevice || devices[0];
+              if (fb) target = fb.default ? 'default' : fb.deviceId;
+            }
+            if (target) await this.setInputDevice(target);
           }
+          this.resolveDeviceListenerReady?.();
         } catch (error) {
+          this.resolveDeviceListenerReady?.();
           this.options.onError(error instanceof Error ? error : new Error(String(error)));
         }
       };
+      this.wavRecorder.listenForDeviceChange(this.deviceChangeListener);
     }
-
-    this.wavRecorder.listenForDeviceChange(this.deviceChangeListener);
+    await this.deviceListenerReady;
   }
 
   private _teardownDeviceListeners(): void {
     this.wavRecorder.listenForDeviceChange(null);
+    this.deviceChangeListener = null;
+    this.deviceListenerReady = null;
+    this.resolveDeviceListenerReady = null;
   }
 
   private async _performDisconnectCleanup(): Promise<void> {
@@ -1181,9 +1246,11 @@ class LayercodeClient implements ILayercodeClient {
       this.isMuted = false;
       console.log('Microphone unmuted');
       this.options.onMuteStateChange(false);
-      this._initializeVAD();
-      if (this.stopRecorderAmplitude === undefined) {
-        this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+      if (this.audioInput && this.recorderStarted) {
+        this._initializeVAD();
+        if (!this.stopRecorderAmplitude) {
+          this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+        }
       }
     }
   }

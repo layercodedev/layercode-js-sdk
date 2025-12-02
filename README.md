@@ -11,7 +11,7 @@ npm install @layercode/js-sdk
 Or you can use a script tag in your HTML:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/@layercode/js-sdk@VERSION/src/layercode-js-sdk.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@layercode/js-sdk@VERSION/dist/layercode-js-sdk.min.js"></script>
 ```
 
 ## Usage
