@@ -947,6 +947,18 @@ class LayercodeClient implements ILayercodeClient {
 
       console.debug('Recorder started successfully with device:', reportedDeviceId);
     } catch (error) {
+      const permissionDeniedError = await this._microphonePermissionDeniedError(error);
+      if (permissionDeniedError) {
+        console.error(permissionDeniedError.message);
+        this.options.onError(permissionDeniedError);
+        throw permissionDeniedError;
+      }
+
+      if (await this._shouldWarnAudioDevicesRequireUserGesture(error)) {
+        console.error(
+          'Cannot load audio devices before user has interacted with the page. Please move connect() to be triggered by a button, or load the SDK with "audioInput: false" to connection() on page load'
+        );
+      }
       console.error('Error starting recorder:', error);
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
       throw error;
@@ -954,6 +966,14 @@ class LayercodeClient implements ILayercodeClient {
   }
 
   async audioInputDisconnect(): Promise<void> {
+    // If we never started the recorder, avoid touching audio APIs at all.
+    if (!this.recorderStarted && !this._hasLiveRecorderStream()) {
+      this._stopRecorderAmplitudeMonitoring();
+      this.stopVad();
+      this._teardownDeviceListeners();
+      this.recorderStarted = false;
+      return;
+    }
     try {
       // stop amplitude monitoring tied to the recorder
       this._stopRecorderAmplitudeMonitoring();
@@ -1099,7 +1119,21 @@ class LayercodeClient implements ILayercodeClient {
       this.audioOutputReady = audioOutputReady;
       await audioOutputReady;
     } catch (error) {
-      console.error('Error connecting to Layercode agent:', error);
+      const permissionDeniedError = await this._microphonePermissionDeniedError(error);
+      if (permissionDeniedError) {
+        console.error(permissionDeniedError.message);
+        this._setStatus('error');
+        this.options.onError(permissionDeniedError);
+        return;
+      }
+
+      if (await this._shouldWarnAudioDevicesRequireUserGesture(error)) {
+        console.error(
+          'Cannot load audio devices before user has interacted with the page. Please move connect() to be triggered by a button, or load the SDK with "audioInput: false" to connection() on page load'
+        );
+      } else {
+        console.error('Error connecting to Layercode agent:', error);
+      }
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -1537,6 +1571,83 @@ class LayercodeClient implements ILayercodeClient {
       return label;
     }
     return null;
+  }
+
+  private _getUserActivationState(): boolean | null {
+    try {
+      const nav: any = typeof navigator !== 'undefined' ? (navigator as any) : null;
+      const act = nav?.userActivation;
+      if (act && typeof act === 'object') {
+        if (typeof act.hasBeenActive === 'boolean') return act.hasBeenActive;
+        if (typeof act.isActive === 'boolean') return act.isActive ? true : null;
+      }
+      const doc: any = typeof document !== 'undefined' ? (document as any) : null;
+      const dact = doc?.userActivation;
+      if (dact && typeof dact === 'object') {
+        if (typeof dact.hasBeenActive === 'boolean') return dact.hasBeenActive;
+        if (typeof dact.isActive === 'boolean') return dact.isActive ? true : null;
+      }
+    } catch {}
+    return null;
+  }
+
+  private async _isMicrophonePermissionDenied(): Promise<boolean | null> {
+    try {
+      const nav: any = typeof navigator !== 'undefined' ? (navigator as any) : null;
+      const permissions = nav?.permissions;
+      if (!permissions?.query) return null;
+      const status = await permissions.query({ name: 'microphone' as any });
+      const state = status?.state;
+      if (state === 'denied') return true;
+      if (state === 'granted' || state === 'prompt') return false;
+    } catch {}
+    return null;
+  }
+
+  private async _microphonePermissionDeniedError(error: unknown): Promise<Error | null> {
+    const err: any = error as any;
+    const message = typeof err?.message === 'string' ? err.message : typeof error === 'string' ? error : '';
+
+    if (message === 'User has denined audio device permissions') {
+      return err instanceof Error ? err : new Error(message);
+    }
+
+    const name = typeof err?.name === 'string' ? err.name : '';
+    const isPermissionLike = name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError';
+    if (!isPermissionLike) {
+      return null;
+    }
+
+    const micDenied = await this._isMicrophonePermissionDenied();
+    if (micDenied === true || /permission denied/i.test(message)) {
+      return new Error('User has denined audio device permissions');
+    }
+
+    return null;
+  }
+
+  private async _shouldWarnAudioDevicesRequireUserGesture(error: unknown): Promise<boolean> {
+    const e: any = error as any;
+    const name = typeof e?.name === 'string' ? e.name : '';
+    const msg =
+      typeof e?.message === 'string'
+        ? e.message
+        : typeof error === 'string'
+          ? error
+          : '';
+
+    const isPermissionLike = name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError';
+    if (!isPermissionLike) return false;
+
+    // If the browser can tell us mic permission is explicitly denied, don't show the "user gesture" guidance.
+    const micDenied = await this._isMicrophonePermissionDenied();
+    if (micDenied === true) return false;
+
+    if (/user activation|user gesture|interacte?d? with( the)? (page|document)|before user has interacted/i.test(msg)) {
+      return true;
+    }
+
+    return this._getUserActivationState() === false;
   }
 
   /**

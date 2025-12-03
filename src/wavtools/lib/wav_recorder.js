@@ -335,7 +335,7 @@ export class WavRecorder {
       // Mark permission as granted so listDevices() won't call requestPermission() again
       this._hasPermission = true;
     } catch (err) {
-      throw new Error('Could not start media stream');
+      throw err;
     }
 
     const createContext = (rate) => {
