@@ -8,13 +8,23 @@ A JavaScript SDK for integrating Layercode voice agents into web applications.
 npm install @layercode/js-sdk
 ```
 
-Or load it directly:
+## Or load it another way:
 
-```html
-<script src="https://cdn.jsdelivr.net/npm/@layercode/js-sdk@VERSION/dist/layercode-js-sdk.min.js"></script>
+- Module import from your own hosted ESM (current project):
+  `const { default: LayercodeClient, listAudioInputDevices, watchAudioInputDevices } = await import("/static/layercode-js-sdk.esm.js");`
+- Module import from npm inside a bundler:
+  `import LayercodeClient, { listAudioInputDevices, watchAudioInputDevices } from "@layercode/js-sdk";`
+- Module import from CDN ESM:
+  `import LayercodeClient, { listAudioInputDevices, watchAudioInputDevices } from "https://cdn.jsdelivr.net/npm/@layercode/js-sdk/dist/layercode-js-sdk.esm.js";`
+- Global access via UMD <script> (no modules):
+```js
+  <script src="https://cdn.jsdelivr.net/npm/@layercode/js-sdk/dist/layercode-js-sdk.umd.js"></script>
+  <script>
+    const { LayercodeClient, listAudioInputDevices, watchAudioInputDevices } = window.Layercode;
+  </script>
 ```
 
-> Device helpers require a secure context (https/localhost) and browser `navigator.mediaDevices` support.
+> Device helpers require a secure context (https/localhost).
 
 ## Device helpers
 

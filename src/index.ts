@@ -1,3 +1,4 @@
+//// src/index.ts
 /* eslint-env browser */
 // import { env as ortEnv } from 'onnxruntime-web';
 // @ts-ignore - VAD package does not provide TypeScript types
@@ -52,95 +53,28 @@ const DEFAULT_WS_URL = 'wss://api.layercode.com/v1/agents/web/websocket';
 
 // SDK version - updated when publishing
 const SDK_VERSION = '2.7.0';
+const DEFAULT_RECORDER_SAMPLE_RATE = 8000;
 
 export type LayercodeAudioInputDevice = (MediaDeviceInfo & { default: boolean }) & {
   label: string;
 };
 
-const MEDIA_DEVICE_CHANGE_EVENT = 'devicechange';
-const MEDIA_DEVICE_KIND_AUDIO: MediaDeviceKind = 'audioinput';
-
 const hasMediaDevicesSupport = (): boolean => typeof navigator !== 'undefined' && !!navigator.mediaDevices;
 
-let microphonePermissionPromise: Promise<void> | null = null;
-let microphonePermissionGranted = false;
+type RawAudioInputDevice = MediaDeviceInfo & { default?: boolean };
 
-const stopStreamTracks = (stream: MediaStream | null | undefined): void => {
-  if (!stream) {
-    return;
-  }
-  stream.getTracks().forEach((track) => {
-    try {
-      track.stop();
-    } catch {
-      /* noop */
-    }
-  });
-};
-
-const ensureMicrophonePermissions = async (): Promise<void> => {
-  if (!hasMediaDevicesSupport()) {
-    throw new Error('Media devices are not available in this environment');
-  }
-
-  if (microphonePermissionGranted) {
-    return;
-  }
-
-  if (!microphonePermissionPromise) {
-    microphonePermissionPromise = navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then((stream) => {
-        microphonePermissionGranted = true;
-        stopStreamTracks(stream);
-      })
-      .finally(() => {
-        microphonePermissionPromise = null;
-      });
-  }
-
-  return microphonePermissionPromise;
-};
-
-const cloneAudioDevice = (device: MediaDeviceInfo, isDefault: boolean): LayercodeAudioInputDevice => {
+const toLayercodeAudioInputDevice = (device: RawAudioInputDevice): LayercodeAudioInputDevice => {
   const cloned: Partial<LayercodeAudioInputDevice> = {
-    deviceId: device.deviceId,
-    groupId: device.groupId,
-    kind: device.kind,
+    ...device,
     label: device.label,
-    default: isDefault,
+    default: Boolean(device.default),
   };
 
   if (typeof device.toJSON === 'function') {
-    cloned.toJSON = device.toJSON.bind(device);
+    (cloned as any).toJSON = device.toJSON.bind(device);
   }
 
   return cloned as LayercodeAudioInputDevice;
-};
-
-const normalizeAudioInputDevices = (devices: MediaDeviceInfo[]): LayercodeAudioInputDevice[] => {
-  const audioDevices = devices.filter((device) => device.kind === MEDIA_DEVICE_KIND_AUDIO);
-  if (!audioDevices.length) {
-    return [];
-  }
-
-  const remaining = [...audioDevices];
-  const normalized: LayercodeAudioInputDevice[] = [];
-
-  const defaultIndex = remaining.findIndex((device) => device.deviceId === 'default');
-  if (defaultIndex !== -1) {
-    let defaultDevice = remaining.splice(defaultIndex, 1)[0];
-    const groupMatchIndex = remaining.findIndex((device) => device.groupId && defaultDevice.groupId && device.groupId === defaultDevice.groupId);
-    if (groupMatchIndex !== -1) {
-      defaultDevice = remaining.splice(groupMatchIndex, 1)[0];
-    }
-    normalized.push(cloneAudioDevice(defaultDevice, true));
-  } else if (remaining.length) {
-    const fallbackDefault = remaining.shift() as MediaDeviceInfo;
-    normalized.push(cloneAudioDevice(fallbackDefault, true));
-  }
-
-  return normalized.concat(remaining.map((device) => cloneAudioDevice(device, false)));
 };
 
 export const listAudioInputDevices = async (): Promise<LayercodeAudioInputDevice[]> => {
@@ -148,9 +82,9 @@ export const listAudioInputDevices = async (): Promise<LayercodeAudioInputDevice
     throw new Error('Media devices are not available in this environment');
   }
 
-  await ensureMicrophonePermissions();
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  return normalizeAudioInputDevices(devices);
+  const recorder = new WavRecorder({ sampleRate: DEFAULT_RECORDER_SAMPLE_RATE });
+  const devices = (await recorder.listDevices()) as RawAudioInputDevice[];
+  return devices.map(toLayercodeAudioInputDevice);
 };
 
 export const watchAudioInputDevices = (callback: (devices: LayercodeAudioInputDevice[]) => void): (() => void) => {
@@ -158,55 +92,18 @@ export const watchAudioInputDevices = (callback: (devices: LayercodeAudioInputDe
     return () => {};
   }
 
-  let disposed = false;
-  let lastSignature: string | null = null;
-  let requestId = 0;
+  const recorder = new WavRecorder({ sampleRate: DEFAULT_RECORDER_SAMPLE_RATE });
 
-  const emitDevices = async (): Promise<void> => {
-    requestId += 1;
-    const currentRequest = requestId;
-    try {
-      const devices = await listAudioInputDevices();
-      if (disposed || currentRequest !== requestId) {
-        return;
-      }
-      const signature = devices.map((device) => `${device.deviceId}:${device.label}:${device.groupId}:${device.default ? '1' : '0'}`).join('|');
-      if (signature !== lastSignature) {
-        lastSignature = signature;
-        callback(devices);
-      }
-    } catch (error) {
-      if (!disposed) {
-        console.warn('Failed to refresh audio devices', error);
-      }
-    }
+  const handleDevicesChange = (devices: RawAudioInputDevice[]) => {
+    callback(devices.map(toLayercodeAudioInputDevice));
   };
 
-  const handler = (): void => {
-    void emitDevices();
-  };
-
-  const mediaDevices = navigator.mediaDevices;
-  let teardown: (() => void) | null = null;
-  if (typeof mediaDevices.addEventListener === 'function') {
-    mediaDevices.addEventListener(MEDIA_DEVICE_CHANGE_EVENT, handler);
-    teardown = () => mediaDevices.removeEventListener(MEDIA_DEVICE_CHANGE_EVENT, handler);
-  } else if ('ondevicechange' in mediaDevices) {
-    const previousHandler = mediaDevices.ondevicechange;
-    mediaDevices.ondevicechange = handler;
-    teardown = () => {
-      if (mediaDevices.ondevicechange === handler) {
-        mediaDevices.ondevicechange = previousHandler || null;
-      }
-    };
-  }
-
-  // Always emit once on subscribe
-  void emitDevices();
+  // WavRecorder handles initial emit + deduping devicechange events
+  recorder.listenForDeviceChange(handleDevicesChange);
 
   return () => {
-    disposed = true;
-    teardown?.();
+    recorder.listenForDeviceChange(null);
+    recorder.quit().catch(() => {});
   };
 };
 
@@ -346,7 +243,8 @@ interface LayercodeClientOptions {
   enableAmplitudeMonitoring?: boolean;
 }
 
-type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>> & Pick<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>;
+type NormalizedLayercodeClientOptions = Required<Omit<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>> &
+  Pick<LayercodeClientOptions, 'authorizeSessionRequest' | 'deferAudioInit'>;
 
 /**
  * @class LayercodeClient
@@ -384,6 +282,8 @@ class LayercodeClient implements ILayercodeClient {
   private deviceChangeListener: ((devices: any[]) => Promise<void>) | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   private recorderRestartChain: Promise<void>;
+  // Flag to skip the first device callback after starting recorder to avoid redundant device switching
+  private _skipFirstDeviceCallback: boolean;
   private deviceListenerReady: Promise<void> | null;
   private resolveDeviceListenerReady: (() => void) | null;
   _websocketUrl: string;
@@ -433,7 +333,7 @@ class LayercodeClient implements ILayercodeClient {
     this._websocketUrl = DEFAULT_WS_URL;
     this.audioOutputReady = null;
 
-    this.wavRecorder = new WavRecorder({ sampleRate: 8000 }); // TODO should be set my fetched agent config
+    this.wavRecorder = new WavRecorder({ sampleRate: DEFAULT_RECORDER_SAMPLE_RATE }); // TODO should be set by fetched agent config
     this.wavPlayer = new WavStreamPlayer({
       finishedPlayingCallback: this._clientResponseAudioReplayFinished.bind(this),
       sampleRate: 16000, // TODO should be set my fetched agent config
@@ -465,6 +365,7 @@ class LayercodeClient implements ILayercodeClient {
     this.stopRecorderAmplitude = undefined;
     this.deviceChangeListener = null;
     this.recorderRestartChain = Promise.resolve();
+    this._skipFirstDeviceCallback = false;
     this.deviceListenerReady = null;
     this.resolveDeviceListenerReady = null;
     // this.audioPauseTime = null;
@@ -830,7 +731,6 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
-
       const base64 = arrayBufferToBase64(data.mono);
 
       // Don't send audio if muted
@@ -908,7 +808,6 @@ class LayercodeClient implements ILayercodeClient {
     }
   }
 
-
   /**
    * Sets up amplitude monitoring for a given audio source.
    * @param {WavRecorder | WavStreamPlayer} source - The audio source (recorder or player).
@@ -970,20 +869,111 @@ class LayercodeClient implements ILayercodeClient {
 
   async audioInputConnect(): Promise<void> {
     // Turn mic ON
-    console.log('audioInputConnect: requesting permission');
-    await this.wavRecorder.requestPermission();
+    // NOTE: On iOS Safari, each getUserMedia call is expensive (~2-3 seconds).
+    // We optimize by:
+    // 1. Starting the recorder FIRST with begin() (single getUserMedia)
+    // 2. THEN setting up device change listeners (which will skip getUserMedia since permission is cached)
+    console.log('audioInputConnect: recorderStarted =', this.recorderStarted);
+
+    // If the recorder hasn't spun up yet, start it first with the preferred or default device
+    // This ensures we only make ONE getUserMedia call instead of multiple sequential ones
+    if (!this.recorderStarted) {
+      // Use preferred device if set, otherwise use system default
+      const targetDeviceId = this.useSystemDefaultDevice ? undefined : this.deviceId || undefined;
+      // Mark as using system default if no specific device is set
+      if (!targetDeviceId) {
+        this.useSystemDefaultDevice = true;
+      }
+      console.log('audioInputConnect: starting recorder with device:', targetDeviceId ?? 'system default');
+      await this._startRecorderWithDevice(targetDeviceId);
+    }
+
+    // Now set up device change listeners - permission is already granted so listDevices() won't call getUserMedia
+    // Skip the first callback since we've already started with the correct device
+    this._skipFirstDeviceCallback = true;
     console.log('audioInputConnect: setting up device change listener');
     await this._setupDeviceChangeListener();
 
-    // If the recorder hasn't spun up yet, proactively select a device.
-    if (!this.recorderStarted && this.deviceChangeListener) {
-      console.log('audioInputConnect: initializing recorder with default device');
-      await this._initializeRecorderWithDefaultDevice();
-    }
     console.log('audioInputConnect: done, recorderStarted =', this.recorderStarted);
   }
 
+  /**
+   * Starts the recorder with a specific device (or default if undefined)
+   * This is the single point where getUserMedia is called during initial setup.
+   * Idempotent: returns early if recorder is already started or has a live stream.
+   */
+  private async _startRecorderWithDevice(deviceId: string | undefined): Promise<void> {
+    // Idempotency guard: don't start again if already running
+    if (this.recorderStarted || this._hasLiveRecorderStream()) {
+      console.debug('_startRecorderWithDevice: already started, skipping');
+      return;
+    }
+
+    try {
+      this._stopRecorderAmplitudeMonitoring();
+      try {
+        await this.wavRecorder.end();
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      await this.wavRecorder.begin(deviceId);
+      await this.wavRecorder.record(this._handleDataAvailable, 1638);
+
+      // Re-setup amplitude monitoring with the new stream
+      this._setupAmplitudeMonitoring(this.wavRecorder, this.options.onUserAmplitudeChange, (amp) => (this.userAudioAmplitude = amp));
+      if (!this.options.enableAmplitudeMonitoring) {
+        this.userAudioAmplitude = 0;
+      }
+
+      const stream = this.wavRecorder.getStream();
+      const activeTrack = stream?.getAudioTracks()[0] || null;
+      const trackSettings = activeTrack && typeof activeTrack.getSettings === 'function' ? activeTrack.getSettings() : null;
+      const trackDeviceId = trackSettings && typeof trackSettings.deviceId === 'string' ? trackSettings.deviceId : null;
+      this.activeDeviceId = trackDeviceId ?? (this.useSystemDefaultDevice ? null : this.deviceId);
+
+      if (!this.recorderStarted) {
+        this.recorderStarted = true;
+        this._sendReadyIfNeeded();
+      }
+
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
+      if (reportedDeviceId !== this.lastReportedDeviceId) {
+        this.lastReportedDeviceId = reportedDeviceId;
+        if (this.options.onDeviceSwitched) {
+          this.options.onDeviceSwitched(reportedDeviceId);
+        }
+      }
+
+      console.debug('Recorder started successfully with device:', reportedDeviceId);
+    } catch (error) {
+      const permissionDeniedError = await this._microphonePermissionDeniedError(error);
+      if (permissionDeniedError) {
+        console.error(permissionDeniedError.message);
+        this.options.onError(permissionDeniedError);
+        throw permissionDeniedError;
+      }
+
+      if (await this._shouldWarnAudioDevicesRequireUserGesture(error)) {
+        console.error(
+          'Cannot load audio devices before user has interacted with the page. Please move connect() to be triggered by a button, or load the SDK with "audioInput: false" to connection() on page load'
+        );
+      }
+      console.error('Error starting recorder:', error);
+      this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+
   async audioInputDisconnect(): Promise<void> {
+    // If we never started the recorder, avoid touching audio APIs at all.
+    if (!this.recorderStarted && !this._hasLiveRecorderStream()) {
+      this._stopRecorderAmplitudeMonitoring();
+      this.stopVad();
+      this._teardownDeviceListeners();
+      this.recorderStarted = false;
+      return;
+    }
     try {
       // stop amplitude monitoring tied to the recorder
       this._stopRecorderAmplitudeMonitoring();
@@ -1129,7 +1119,21 @@ class LayercodeClient implements ILayercodeClient {
       this.audioOutputReady = audioOutputReady;
       await audioOutputReady;
     } catch (error) {
-      console.error('Error connecting to Layercode agent:', error);
+      const permissionDeniedError = await this._microphonePermissionDeniedError(error);
+      if (permissionDeniedError) {
+        console.error(permissionDeniedError.message);
+        this._setStatus('error');
+        this.options.onError(permissionDeniedError);
+        return;
+      }
+
+      if (await this._shouldWarnAudioDevicesRequireUserGesture(error)) {
+        console.error(
+          'Cannot load audio devices before user has interacted with the page. Please move connect() to be triggered by a button, or load the SDK with "audioInput: false" to connection() on page load'
+        );
+      } else {
+        console.error('Error connecting to Layercode agent:', error);
+      }
       this._setStatus('error');
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -1305,7 +1309,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -1364,7 +1368,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
@@ -1383,34 +1387,6 @@ class LayercodeClient implements ILayercodeClient {
     const run = this.recorderRestartChain.then(() => this._restartAudioRecording());
     this.recorderRestartChain = run.catch(() => {});
     return run;
-  }
-
-  private async _initializeRecorderWithDefaultDevice(): Promise<void> {
-    console.log('_initializeRecorderWithDefaultDevice called, deviceChangeListener:', !!this.deviceChangeListener);
-    if (!this.deviceChangeListener) {
-      return;
-    }
-
-    try {
-      const devices = await this.wavRecorder.listDevices();
-      console.log('_initializeRecorderWithDefaultDevice: got devices:', devices.length);
-      if (devices.length) {
-        console.log('_initializeRecorderWithDefaultDevice: calling deviceChangeListener');
-        await this.deviceChangeListener(devices);
-        return;
-      }
-      console.warn('No audio input devices available when enabling microphone');
-    } catch (error) {
-      console.warn('Unable to prime audio devices from listDevices()', error);
-    }
-
-    try {
-      console.log('_initializeRecorderWithDefaultDevice: calling setInputDevice default');
-      await this.setInputDevice('default');
-    } catch (error) {
-      console.error('Failed to start recording with the system default device:', error);
-      throw error;
-    }
   }
 
   /**
@@ -1455,7 +1431,7 @@ class LayercodeClient implements ILayercodeClient {
       });
 
       this.deviceChangeListener = async (devices: any[]) => {
-        console.log('deviceChangeListener called, devices:', devices.length, 'recorderStarted:', this.recorderStarted);
+        console.log('deviceChangeListener called, devices:', devices.length, 'recorderStarted:', this.recorderStarted, '_skipFirstDeviceCallback:', this._skipFirstDeviceCallback);
         try {
           // Notify user that devices have changed
           this.options.onDevicesChanged(devices);
@@ -1464,6 +1440,16 @@ class LayercodeClient implements ILayercodeClient {
           const usingDefaultDevice = this.useSystemDefaultDevice;
           const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
           const currentDefaultDeviceKey = this._getDeviceComparisonKey(defaultDevice);
+
+          // Skip switching on the first callback after starting the recorder to avoid redundant begin() calls
+          // This is set by audioInputConnect() after _startRecorderWithDevice() completes
+          if (this._skipFirstDeviceCallback) {
+            console.log('deviceChangeListener: skipping first callback after recorder start');
+            this._skipFirstDeviceCallback = false;
+            this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
+            this.resolveDeviceListenerReady?.();
+            return;
+          }
 
           let shouldSwitch = !this.recorderStarted;
           console.log('deviceChangeListener: shouldSwitch initial:', shouldSwitch);
@@ -1474,10 +1460,7 @@ class LayercodeClient implements ILayercodeClient {
                 shouldSwitch = true;
               } else if (this.activeDeviceId && defaultDevice.deviceId !== 'default' && defaultDevice.deviceId !== this.activeDeviceId) {
                 shouldSwitch = true;
-              } else if (
-                (previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) ||
-                (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted)
-              ) {
+              } else if ((previousDefaultDeviceKey && previousDefaultDeviceKey !== currentDefaultDeviceKey) || (!previousDefaultDeviceKey && !currentDefaultDeviceKey && this.recorderStarted)) {
                 shouldSwitch = true;
               }
             } else {
@@ -1545,6 +1528,7 @@ class LayercodeClient implements ILayercodeClient {
     this.lastKnownSystemDefaultDeviceKey = null;
     this.recorderStarted = false;
     this.readySent = false;
+    this._skipFirstDeviceCallback = false;
 
     this._stopAmplitudeMonitoring();
     this._teardownDeviceListeners();
@@ -1587,6 +1571,83 @@ class LayercodeClient implements ILayercodeClient {
       return label;
     }
     return null;
+  }
+
+  private _getUserActivationState(): boolean | null {
+    try {
+      const nav: any = typeof navigator !== 'undefined' ? (navigator as any) : null;
+      const act = nav?.userActivation;
+      if (act && typeof act === 'object') {
+        if (typeof act.hasBeenActive === 'boolean') return act.hasBeenActive;
+        if (typeof act.isActive === 'boolean') return act.isActive ? true : null;
+      }
+      const doc: any = typeof document !== 'undefined' ? (document as any) : null;
+      const dact = doc?.userActivation;
+      if (dact && typeof dact === 'object') {
+        if (typeof dact.hasBeenActive === 'boolean') return dact.hasBeenActive;
+        if (typeof dact.isActive === 'boolean') return dact.isActive ? true : null;
+      }
+    } catch {}
+    return null;
+  }
+
+  private async _isMicrophonePermissionDenied(): Promise<boolean | null> {
+    try {
+      const nav: any = typeof navigator !== 'undefined' ? (navigator as any) : null;
+      const permissions = nav?.permissions;
+      if (!permissions?.query) return null;
+      const status = await permissions.query({ name: 'microphone' as any });
+      const state = status?.state;
+      if (state === 'denied') return true;
+      if (state === 'granted' || state === 'prompt') return false;
+    } catch {}
+    return null;
+  }
+
+  private async _microphonePermissionDeniedError(error: unknown): Promise<Error | null> {
+    const err: any = error as any;
+    const message = typeof err?.message === 'string' ? err.message : typeof error === 'string' ? error : '';
+
+    if (message === 'User has denined audio device permissions') {
+      return err instanceof Error ? err : new Error(message);
+    }
+
+    const name = typeof err?.name === 'string' ? err.name : '';
+    const isPermissionLike = name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError';
+    if (!isPermissionLike) {
+      return null;
+    }
+
+    const micDenied = await this._isMicrophonePermissionDenied();
+    if (micDenied === true || /permission denied/i.test(message)) {
+      return new Error('User has denined audio device permissions');
+    }
+
+    return null;
+  }
+
+  private async _shouldWarnAudioDevicesRequireUserGesture(error: unknown): Promise<boolean> {
+    const e: any = error as any;
+    const name = typeof e?.name === 'string' ? e.name : '';
+    const msg =
+      typeof e?.message === 'string'
+        ? e.message
+        : typeof error === 'string'
+          ? error
+          : '';
+
+    const isPermissionLike = name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError';
+    if (!isPermissionLike) return false;
+
+    // If the browser can tell us mic permission is explicitly denied, don't show the "user gesture" guidance.
+    const micDenied = await this._isMicrophonePermissionDenied();
+    if (micDenied === true) return false;
+
+    if (/user activation|user gesture|interacte?d? with( the)? (page|document)|before user has interacted/i.test(msg)) {
+      return true;
+    }
+
+    return this._getUserActivationState() === false;
   }
 
   /**
