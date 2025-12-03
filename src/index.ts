@@ -282,6 +282,8 @@ class LayercodeClient implements ILayercodeClient {
   private deviceChangeListener: ((devices: any[]) => Promise<void>) | null;
   // private audioPauseTime: number | null; // Track when audio was paused for VAD
   private recorderRestartChain: Promise<void>;
+  // Flag to skip the first device callback after starting recorder to avoid redundant device switching
+  private _skipFirstDeviceCallback: boolean;
   private deviceListenerReady: Promise<void> | null;
   private resolveDeviceListenerReady: (() => void) | null;
   _websocketUrl: string;
@@ -363,6 +365,7 @@ class LayercodeClient implements ILayercodeClient {
     this.stopRecorderAmplitude = undefined;
     this.deviceChangeListener = null;
     this.recorderRestartChain = Promise.resolve();
+    this._skipFirstDeviceCallback = false;
     this.deviceListenerReady = null;
     this.resolveDeviceListenerReady = null;
     // this.audioPauseTime = null;
@@ -872,14 +875,22 @@ class LayercodeClient implements ILayercodeClient {
     // 2. THEN setting up device change listeners (which will skip getUserMedia since permission is cached)
     console.log('audioInputConnect: recorderStarted =', this.recorderStarted);
 
-    // If the recorder hasn't spun up yet, start it first with the default device
+    // If the recorder hasn't spun up yet, start it first with the preferred or default device
     // This ensures we only make ONE getUserMedia call instead of multiple sequential ones
     if (!this.recorderStarted) {
-      console.log('audioInputConnect: starting recorder with default device');
-      await this._startRecorderWithDevice(undefined);
+      // Use preferred device if set, otherwise use system default
+      const targetDeviceId = this.useSystemDefaultDevice ? undefined : this.deviceId || undefined;
+      // Mark as using system default if no specific device is set
+      if (!targetDeviceId) {
+        this.useSystemDefaultDevice = true;
+      }
+      console.log('audioInputConnect: starting recorder with device:', targetDeviceId ?? 'system default');
+      await this._startRecorderWithDevice(targetDeviceId);
     }
 
     // Now set up device change listeners - permission is already granted so listDevices() won't call getUserMedia
+    // Skip the first callback since we've already started with the correct device
+    this._skipFirstDeviceCallback = true;
     console.log('audioInputConnect: setting up device change listener');
     await this._setupDeviceChangeListener();
 
@@ -888,9 +899,16 @@ class LayercodeClient implements ILayercodeClient {
 
   /**
    * Starts the recorder with a specific device (or default if undefined)
-   * This is the single point where getUserMedia is called during initial setup
+   * This is the single point where getUserMedia is called during initial setup.
+   * Idempotent: returns early if recorder is already started or has a live stream.
    */
   private async _startRecorderWithDevice(deviceId: string | undefined): Promise<void> {
+    // Idempotency guard: don't start again if already running
+    if (this.recorderStarted || this._hasLiveRecorderStream()) {
+      console.debug('_startRecorderWithDevice: already started, skipping');
+      return;
+    }
+
     try {
       this._stopRecorderAmplitudeMonitoring();
       try {
@@ -1379,7 +1397,7 @@ class LayercodeClient implements ILayercodeClient {
       });
 
       this.deviceChangeListener = async (devices: any[]) => {
-        console.log('deviceChangeListener called, devices:', devices.length, 'recorderStarted:', this.recorderStarted);
+        console.log('deviceChangeListener called, devices:', devices.length, 'recorderStarted:', this.recorderStarted, '_skipFirstDeviceCallback:', this._skipFirstDeviceCallback);
         try {
           // Notify user that devices have changed
           this.options.onDevicesChanged(devices);
@@ -1388,6 +1406,16 @@ class LayercodeClient implements ILayercodeClient {
           const usingDefaultDevice = this.useSystemDefaultDevice;
           const previousDefaultDeviceKey = this.lastKnownSystemDefaultDeviceKey;
           const currentDefaultDeviceKey = this._getDeviceComparisonKey(defaultDevice);
+
+          // Skip switching on the first callback after starting the recorder to avoid redundant begin() calls
+          // This is set by audioInputConnect() after _startRecorderWithDevice() completes
+          if (this._skipFirstDeviceCallback) {
+            console.log('deviceChangeListener: skipping first callback after recorder start');
+            this._skipFirstDeviceCallback = false;
+            this.lastKnownSystemDefaultDeviceKey = currentDefaultDeviceKey;
+            this.resolveDeviceListenerReady?.();
+            return;
+          }
 
           let shouldSwitch = !this.recorderStarted;
           console.log('deviceChangeListener: shouldSwitch initial:', shouldSwitch);
@@ -1466,6 +1494,7 @@ class LayercodeClient implements ILayercodeClient {
     this.lastKnownSystemDefaultDeviceKey = null;
     this.recorderStarted = false;
     this.readySent = false;
+    this._skipFirstDeviceCallback = false;
 
     this._stopAmplitudeMonitoring();
     this._teardownDeviceListeners();

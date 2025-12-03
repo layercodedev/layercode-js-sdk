@@ -42,6 +42,8 @@ export class WavRecorder {
     // Track whether we've already obtained microphone permission
     // This avoids redundant getUserMedia calls which are expensive on iOS Safari
     this._hasPermission = false;
+    // Promise used to dedupe concurrent requestPermission() calls
+    this._permissionPromise = null;
     // Event handling with AudioWorklet
     this._lastEventId = 0;
     this.eventReceipts = {};
@@ -237,7 +239,8 @@ export class WavRecorder {
 
   /**
    * Manually request permission to use the microphone
-   * Skips if permission has already been granted to avoid expensive redundant getUserMedia calls
+   * Skips if permission has already been granted to avoid expensive redundant getUserMedia calls.
+   * Dedupes concurrent calls to prevent multiple getUserMedia requests.
    * @returns {Promise<true>}
    */
   async requestPermission() {
@@ -245,19 +248,30 @@ export class WavRecorder {
     if (this._hasPermission) {
       return true;
     }
-    console.log('ensureUserMediaAccess');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
-      // Stop the tracks immediately after getting permission
-      stream.getTracks().forEach((track) => track.stop());
-      this._hasPermission = true;
-    } catch (fallbackError) {
-      console.error('getUserMedia failed:', fallbackError.name, fallbackError.message);
-      throw fallbackError;
+    // Dedupe concurrent calls: if a permission request is already in flight, wait for it
+    if (this._permissionPromise) {
+      return this._permissionPromise;
     }
-    return true;
+
+    console.log('ensureUserMediaAccess');
+    this._permissionPromise = (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        // Stop the tracks immediately after getting permission
+        stream.getTracks().forEach((track) => track.stop());
+        this._hasPermission = true;
+        return true;
+      } catch (fallbackError) {
+        console.error('getUserMedia failed:', fallbackError.name, fallbackError.message);
+        throw fallbackError;
+      } finally {
+        this._permissionPromise = null;
+      }
+    })();
+
+    return this._permissionPromise;
   }
 
   /**
