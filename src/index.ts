@@ -945,6 +945,11 @@ class LayercodeClient implements ILayercodeClient {
         }
       }
 
+      // Ensure automatic mode has a VAD instance once the recorder stream is live
+      if (!this.vad && !this.pushToTalkEnabled) {
+        await this._initializeVAD();
+      }
+
       console.debug('Recorder started successfully with device:', reportedDeviceId);
     } catch (error) {
       const permissionDeniedError = await this._microphonePermissionDeniedError(error);
