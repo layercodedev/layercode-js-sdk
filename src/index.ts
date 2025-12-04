@@ -731,26 +731,34 @@ class LayercodeClient implements ILayercodeClient {
    */
   private _handleDataAvailable(data: { mono: Int16Array<ArrayBufferLike> }): void {
     try {
-      const base64 = arrayBufferToBase64(data.mono);
-
-      // Don't send audio if muted
+      // Don't send or buffer audio if muted. Also clear any stale buffer so we
+      // don't accidentally flush old audio after unmute.
       if (this.isMuted) {
+        this.audioBuffer = [];
         return;
       }
 
       // Determine if we should gate audio based on VAD configuration
-      const shouldGateAudio = this.vadConfig?.gate_audio !== false; // Default to true if not specified
-      const bufferFrames = this.vadConfig?.buffer_frames ?? 10; // Default to 10 if not specified
+      const shouldGateAudio = this.vadConfig?.gate_audio !== false; // default true
+      const bufferFrames = this.vadConfig?.buffer_frames ?? 10; // default 10
+
+      // If VAD is disabled or failed to init, gating would deadlock (userIsSpeaking never flips true).
+      // Only gate if we actually have a running VAD instance.
+      const vadEnabledByConfig = this.vadConfig?.enabled !== false; // default true
+      const vadAvailable = vadEnabledByConfig && !!this.vad && !this.pushToTalkEnabled;
 
       let sendAudio: boolean;
       if (this.pushToTalkEnabled) {
         sendAudio = this.pushToTalkActive;
       } else if (shouldGateAudio) {
-        sendAudio = this.userIsSpeaking;
+        // Key fix: if VAD isn't available, don't gate — send audio.
+        sendAudio = vadAvailable ? this.userIsSpeaking : true;
       } else {
         // If gate_audio is false, always send audio
         sendAudio = true;
       }
+
+      const base64 = arrayBufferToBase64(data.mono);
 
       if (sendAudio) {
         // If we have buffered audio and we're gating, send it first
@@ -937,7 +945,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
       if (reportedDeviceId !== this.lastReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
@@ -1314,7 +1322,7 @@ class LayercodeClient implements ILayercodeClient {
         const newStream = this.wavRecorder.getStream();
         await this._reinitializeVAD(newStream);
       }
-      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (normalizedDeviceId ?? 'default'));
+      const reportedDeviceId = this.lastReportedDeviceId ?? this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : normalizedDeviceId ?? 'default');
       console.debug(`Successfully switched to input device: ${reportedDeviceId}`);
     } catch (error) {
       console.error(`Failed to switch to input device ${deviceId}:`, error);
@@ -1373,7 +1381,7 @@ class LayercodeClient implements ILayercodeClient {
         this._sendReadyIfNeeded();
       }
 
-      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : (this.deviceId ?? 'default'));
+      const reportedDeviceId = this.activeDeviceId ?? (this.useSystemDefaultDevice ? 'default' : this.deviceId ?? 'default');
       if (reportedDeviceId !== previousReportedDeviceId) {
         this.lastReportedDeviceId = reportedDeviceId;
         if (this.options.onDeviceSwitched) {
@@ -1634,12 +1642,7 @@ class LayercodeClient implements ILayercodeClient {
   private async _shouldWarnAudioDevicesRequireUserGesture(error: unknown): Promise<boolean> {
     const e: any = error as any;
     const name = typeof e?.name === 'string' ? e.name : '';
-    const msg =
-      typeof e?.message === 'string'
-        ? e.message
-        : typeof error === 'string'
-          ? error
-          : '';
+    const msg = typeof e?.message === 'string' ? e.message : typeof error === 'string' ? error : '';
 
     const isPermissionLike = name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError';
     if (!isPermissionLike) return false;
