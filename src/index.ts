@@ -2,6 +2,31 @@
 /* eslint-env browser */
 // import { env as ortEnv } from 'onnxruntime-web';
 // @ts-ignore - VAD package does not provide TypeScript types
+
+/**
+ * Layercode Web SDK notes / gotchas
+ *
+ * Modes:
+ * - audioInput=false => text-only mode. Do NOT touch getUserMedia or request mic permissions.
+ * - audioInput=true  => capture/send mic audio (may trigger permission prompt).
+ * - audioOutput=false => do not play audio, but MUST still send
+ *   `trigger.response.audio.replay_finished` once per assistant turn so the server can advance.
+ *
+ * Transcription:
+ * - trigger='push_to_talk' => no VAD; only send audio between triggerUserTurnStarted/Finished.
+ * - trigger='automatic'   => VAD drives userSpeaking + optional audio gating.
+ *
+ * Performance:
+ * - Mobile browsers e.g. iOS Safari media APIs can be slow; avoid multiple sequential getUserMedia calls.
+ *   This file starts the recorder first, then sets up device listeners.
+ *
+ * Compatibility:
+ * - This is consumed by the Layercode React SDK; treat public API/event shape changes as breaking.
+ *
+ * Assets:
+ * - VAD/ORT assets are loaded from assets.layercode.com (Cloudflare).
+ */
+
 import { MicVAD } from '@ricky0123/vad-web';
 import { WavRecorder, WavStreamPlayer } from './wavtools/index.js';
 import { base64ToArrayBuffer, arrayBufferToBase64 } from './utils.js';
