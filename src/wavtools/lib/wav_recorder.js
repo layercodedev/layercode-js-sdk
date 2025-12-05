@@ -222,7 +222,7 @@ export class WavRecorder {
           .join(',');
       const cb = async () => {
         let id = ++lastId;
-        const devices = await this.listDevices();
+        const devices = await this.listDevices({ requestPermission: false });
         if (id === lastId) {
           if (serializeDevices(lastDevices) !== serializeDevices(devices)) {
             lastDevices = devices;
@@ -275,14 +275,22 @@ export class WavRecorder {
   }
 
   /**
-   * List all eligible devices for recording, will request permission to use microphone
+   * List all eligible devices for recording.
+   *
+   * By default this will *not* request mic permission; labels may be empty until
+   * the user has granted permission via begin()/getUserMedia.
+   * Pass { requestPermission: true } to explicitly trigger a permission prompt.
+   *
+   * @param {{ requestPermission?: boolean }} [options]
    * @returns {Promise<Array<MediaDeviceInfo & {default: boolean}>>}
    */
-  async listDevices() {
+  async listDevices({ requestPermission = false } = {}) {
     if (!navigator.mediaDevices || !('enumerateDevices' in navigator.mediaDevices)) {
       throw new Error('Could not request user devices');
     }
-    await this.requestPermission();
+    if (requestPermission) {
+      await this.requestPermission();
+    }
 
     const devices = await navigator.mediaDevices.enumerateDevices();
     const audioDevices = devices.filter((device) => device.kind === 'audioinput');
@@ -332,7 +340,7 @@ export class WavRecorder {
         config.audio.deviceId = { exact: deviceId };
       }
       this.stream = await navigator.mediaDevices.getUserMedia(config);
-      // Mark permission as granted so listDevices() won't call requestPermission() again
+      // Mark permission as granted so requestPermission() can skip expensive redundant getUserMedia calls
       this._hasPermission = true;
     } catch (err) {
       throw err;
