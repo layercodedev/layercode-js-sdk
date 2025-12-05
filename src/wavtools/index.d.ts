@@ -8,7 +8,7 @@ export class WavRecorder {
   read(): Promise<{ meanValues: Float32Array; channels: Array<Float32Array> }>;
   save(force?: boolean): Promise<import('./lib/wav_packer.js').WavPackerAudioType>;
   quit(): Promise<true>;
-  listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
+  listDevices(options?: { requestPermission?: boolean }): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   requestPermission(): Promise<true>;
   listenForDeviceChange(callback: ((devices: Array<MediaDeviceInfo & { default: boolean }>) => void) | null): true;
   getFrequencies(analysisType?: 'frequency' | 'music' | 'voice', minDecibels?: number, maxDecibels?: number): import('./lib/analysis/audio_analysis.js').AudioAnalysisOutputType;

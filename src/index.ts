@@ -102,13 +102,13 @@ const toLayercodeAudioInputDevice = (device: RawAudioInputDevice): LayercodeAudi
   return cloned as LayercodeAudioInputDevice;
 };
 
-export const listAudioInputDevices = async (): Promise<LayercodeAudioInputDevice[]> => {
+export const listAudioInputDevices = async (options: { requestPermission?: boolean } = {}): Promise<LayercodeAudioInputDevice[]> => {
   if (!hasMediaDevicesSupport()) {
     throw new Error('Media devices are not available in this environment');
   }
 
   const recorder = new WavRecorder({ sampleRate: DEFAULT_RECORDER_SAMPLE_RATE });
-  const devices = (await recorder.listDevices()) as RawAudioInputDevice[];
+  const devices = (await recorder.listDevices({ requestPermission: Boolean(options.requestPermission) })) as RawAudioInputDevice[];
   return devices.map(toLayercodeAudioInputDevice);
 };
 
@@ -191,7 +191,7 @@ interface ILayercodeClient {
   setPreferredInputDevice(deviceId: string | null): Promise<void>;
   setAudioInput(state: boolean): Promise<void>;
   setAudioOutput(state: boolean): Promise<void>;
-  listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
+  listDevices(options?: { requestPermission?: boolean }): Promise<Array<MediaDeviceInfo & { default: boolean }>>;
   onDeviceSwitched?: (deviceId: string) => void;
   onDevicesChanged?: (devices: Array<MediaDeviceInfo & { default: boolean }>) => void;
   mute(): void;
@@ -1316,8 +1316,8 @@ class LayercodeClient implements ILayercodeClient {
    * List all available audio input devices
    * @returns {Promise<Array<MediaDeviceInfo & {default: boolean}>>}
    */
-  async listDevices(): Promise<Array<MediaDeviceInfo & { default: boolean }>> {
-    return this.wavRecorder.listDevices();
+  async listDevices(options?: { requestPermission?: boolean }): Promise<Array<MediaDeviceInfo & { default: boolean }>> {
+    return this.wavRecorder.listDevices(options);
   }
 
   /**
