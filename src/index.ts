@@ -425,8 +425,16 @@ class LayercodeClient implements ILayercodeClient {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode or mute mode, we don't need to use the VAD model
-    if (this.pushToTalkEnabled || !this._shouldCaptureUserAudio() || !this.enableVAD) {
-      console.debug('Skipping VAD init: audio input disabled or muted');
+    if (this.pushToTalkEnabled) {
+      console.debug('Skipping VAD init: push to talk enabled');
+      return;
+    }
+    if (!this._shouldCaptureUserAudio()) {
+      console.debug('Skipping VAD init: audio input disabled');
+      return;
+    }
+    if (!this.enableVAD) {
+      console.debug('Skipping VAD init: VAD disabled');
       return;
     }
 
