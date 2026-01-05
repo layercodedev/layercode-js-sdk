@@ -232,6 +232,9 @@ interface LayercodeClientOptions {
    * This avoids Chrome's autoplay policy blocking AudioContext before user gesture.
    */
   deferAudioInit?: boolean;
+
+  /** Whether VAD is run locally */
+  enableVAD?: boolean;
   /** Fired when audio input flag changes */
   audioInputChanged?: (audioInput: boolean) => void;
   /** Fired when audio output flag changes */
@@ -283,6 +286,7 @@ class LayercodeClient implements ILayercodeClient {
   private ws: WebSocket | null;
   private audioInput: boolean;
   private audioOutput: boolean;
+  private enableVAD: boolean;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private audioOutputReady: Promise<void> | null;
   private pushToTalkActive: boolean;
@@ -351,8 +355,9 @@ class LayercodeClient implements ILayercodeClient {
 
     this.audioInput = options.audioInput ?? true;
     this.audioOutput = options.audioOutput ?? true;
-
     this._emitAudioInput();
+
+    this.enableVAD = options.enableVAD ?? true;
 
     this.AMPLITUDE_MONITORING_SAMPLE_RATE = 2;
     this._websocketUrl = DEFAULT_WS_URL;
@@ -420,7 +425,7 @@ class LayercodeClient implements ILayercodeClient {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
 
     // If we're in push to talk mode or mute mode, we don't need to use the VAD model
-    if (this.pushToTalkEnabled || !this._shouldCaptureUserAudio()) {
+    if (this.pushToTalkEnabled || !this._shouldCaptureUserAudio() || !this.enableVAD) {
       console.debug('Skipping VAD init: audio input disabled or muted');
       return;
     }
