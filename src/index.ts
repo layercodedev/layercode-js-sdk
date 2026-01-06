@@ -205,6 +205,7 @@ interface ILayercodeClient {
   readonly conversationId: string | null;
   readonly userSpeaking: boolean;
   readonly agentSpeaking: boolean;
+  readonly enableVAD: boolean;
 }
 
 /**
@@ -225,6 +226,8 @@ interface LayercodeClientOptions {
   audioInput?: boolean;
   /** Whether audio output is enabled. I.e. do we play the sound in the browser client */
   audioOutput?: boolean;
+  /** Whether Voice Activity Detection is enabled (default: true) */
+  enableVAD?: boolean;
   /**
    * When true, defers actual audio hardware initialization (AudioContext, mic permissions)
    * until setAudioInput(true) or setAudioOutput(true) is called.
@@ -283,6 +286,7 @@ class LayercodeClient implements ILayercodeClient {
   private ws: WebSocket | null;
   private audioInput: boolean;
   private audioOutput: boolean;
+  readonly enableVAD: boolean;
   private AMPLITUDE_MONITORING_SAMPLE_RATE: number;
   private audioOutputReady: Promise<void> | null;
   private pushToTalkActive: boolean;
@@ -332,6 +336,7 @@ class LayercodeClient implements ILayercodeClient {
       audioInput: options.audioInput ?? true,
       audioInputChanged: options.audioInputChanged ?? NOOP,
       audioOutput: options.audioOutput ?? true,
+      enableVAD: options.enableVAD ?? true,
       audioOutputChanged: options.audioOutputChanged ?? NOOP,
       onConnect: options.onConnect ?? NOOP,
       onDisconnect: options.onDisconnect ?? NOOP,
@@ -370,6 +375,7 @@ class LayercodeClient implements ILayercodeClient {
     this.agentAudioAmplitude = 0;
     this.conversationId = this.options.conversationId;
     this.pushToTalkActive = false;
+    this.enableVAD = this.options.enableVAD ?? true;
     this.pushToTalkEnabled = false;
     this.canInterrupt = false;
     this.userIsSpeaking = false;
@@ -418,6 +424,12 @@ class LayercodeClient implements ILayercodeClient {
 
   private async _initializeVAD(): Promise<void> {
     console.log('initializing VAD', { pushToTalkEnabled: this.pushToTalkEnabled, canInterrupt: this.canInterrupt, vadConfig: this.vadConfig });
+
+    // sometimes users want to disable vad to reduce work on client side
+    if (!this.enableVAD) {
+      console.debug('Skipping VAD init: VAD disabled');
+      return;
+    }
 
     // If we're in push to talk mode or mute mode, we don't need to use the VAD model
     if (this.pushToTalkEnabled || !this._shouldCaptureUserAudio()) {
