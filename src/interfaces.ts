@@ -14,6 +14,7 @@ export type LayercodeMessageType =
   | 'turn.end'
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
+  | 'response.text.delta' // Streaming text delta
   | 'response.data' // Webhook event forwarded by server to client
   | 'response.end' // Signals end of assistant response
   | 'user.transcript.interim_delta' // Interial partial user transcript text that will updated as confidance in the transcription increases
@@ -93,6 +94,12 @@ export interface ServerResponseTextMessage extends BaseLayercodeMessage {
   turn_id: string;
 }
 
+export interface ServerResponseTextDeltaMessage extends BaseLayercodeMessage {
+  type: 'response.text.delta';
+  content: string;
+  turn_id: string;
+}
+
 export interface ServerResponseDataMessage extends BaseLayercodeMessage {
   type: 'response.data';
   content: any;
@@ -141,6 +148,7 @@ export type ServerMessage =
   | ServerTurnEndMessage
   | ServerResponseAudioMessage
   | ServerResponseTextMessage
+  | ServerResponseTextDeltaMessage
   | ServerResponseDataMessage
   | ServerResponseEndMessage
   | ServerResponseUserTranscriptInterimDelta

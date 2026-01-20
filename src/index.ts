@@ -741,6 +741,7 @@ class LayercodeClient implements ILayercodeClient {
         }
 
         case 'response.text':
+        case 'response.text.delta':
           // Set turn ID from first text message if not set
           if (!this.currentTurnId) {
             this.currentTurnId = message.turn_id;
