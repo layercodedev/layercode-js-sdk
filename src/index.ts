@@ -670,6 +670,21 @@ class LayercodeClient implements ILayercodeClient {
           break;
         }
 
+        case 'turn.end': {
+          // Sent from the server when a turn ends
+          if (message.role === 'user') {
+            this._setUserSpeaking(false);
+          } else if (message.role === 'assistant') {
+            this._setAgentSpeaking(false);
+          }
+          this.options.onMessage({
+            ...message,
+            agentSpeaking: this.agentIsSpeaking,
+            userSpeaking: this.userIsSpeaking,
+          });
+          break;
+        }
+
         case 'response.end': {
           // When audioOutput is disabled, notify server that "playback" is complete
           if (!this.audioOutput && !this.sentReplayFinishedForDisabledOutput) {
@@ -726,6 +741,7 @@ class LayercodeClient implements ILayercodeClient {
         }
 
         case 'response.text':
+        case 'response.text.delta':
           // Set turn ID from first text message if not set
           if (!this.currentTurnId) {
             this.currentTurnId = message.turn_id;

@@ -11,8 +11,10 @@ export type LayercodeMessageType =
 
   // Server → Client WebSocket
   | 'turn.start'
+  | 'turn.end'
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
+  | 'response.text.delta' // Streaming text delta
   | 'response.data' // Webhook event forwarded by server to client
   | 'response.end' // Signals end of assistant response
   | 'user.transcript.interim_delta' // Interial partial user transcript text that will updated as confidance in the transcription increases
@@ -67,10 +69,16 @@ export interface ClientTriggerResponseAudioReplayFinishedMessage extends BaseLay
 }
 
 // Layercode Server WebSocket Messages → Client Browser WebSocket Messages
-export interface ServerTurnMessage extends BaseLayercodeMessage {
+export interface ServerTurnStartMessage extends BaseLayercodeMessage {
   type: 'turn.start';
   role: 'user' | 'assistant'; // Note assistant role events are not currently implemented
   // turn_id: string; // TODO refactor our agents to allow turn_id to be included here
+}
+
+export interface ServerTurnEndMessage extends BaseLayercodeMessage {
+  type: 'turn.end';
+  role: 'user' | 'assistant';
+  turn_id: string;
 }
 
 export interface ServerResponseAudioMessage extends BaseLayercodeMessage {
@@ -82,6 +90,12 @@ export interface ServerResponseAudioMessage extends BaseLayercodeMessage {
 
 export interface ServerResponseTextMessage extends BaseLayercodeMessage {
   type: 'response.text';
+  content: string;
+  turn_id: string;
+}
+
+export interface ServerResponseTextDeltaMessage extends BaseLayercodeMessage {
+  type: 'response.text.delta';
   content: string;
   turn_id: string;
 }
@@ -130,9 +144,11 @@ export interface ServerResponseEndMessage extends BaseLayercodeMessage {
 }
 
 export type ServerMessage =
-  | ServerTurnMessage
+  | ServerTurnStartMessage
+  | ServerTurnEndMessage
   | ServerResponseAudioMessage
   | ServerResponseTextMessage
+  | ServerResponseTextDeltaMessage
   | ServerResponseDataMessage
   | ServerResponseEndMessage
   | ServerResponseUserTranscriptInterimDelta
