@@ -11,6 +11,7 @@ export type LayercodeMessageType =
 
   // Server → Client WebSocket
   | 'turn.start'
+  | 'turn.end'
   | 'response.audio'
   | 'response.text' // Text content for interruption tracking
   | 'response.data' // Webhook event forwarded by server to client
@@ -67,10 +68,16 @@ export interface ClientTriggerResponseAudioReplayFinishedMessage extends BaseLay
 }
 
 // Layercode Server WebSocket Messages → Client Browser WebSocket Messages
-export interface ServerTurnMessage extends BaseLayercodeMessage {
+export interface ServerTurnStartMessage extends BaseLayercodeMessage {
   type: 'turn.start';
   role: 'user' | 'assistant'; // Note assistant role events are not currently implemented
   // turn_id: string; // TODO refactor our agents to allow turn_id to be included here
+}
+
+export interface ServerTurnEndMessage extends BaseLayercodeMessage {
+  type: 'turn.end';
+  role: 'user' | 'assistant';
+  turn_id: string;
 }
 
 export interface ServerResponseAudioMessage extends BaseLayercodeMessage {
@@ -130,7 +137,8 @@ export interface ServerResponseEndMessage extends BaseLayercodeMessage {
 }
 
 export type ServerMessage =
-  | ServerTurnMessage
+  | ServerTurnStartMessage
+  | ServerTurnEndMessage
   | ServerResponseAudioMessage
   | ServerResponseTextMessage
   | ServerResponseDataMessage
