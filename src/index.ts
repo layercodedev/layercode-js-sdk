@@ -1462,8 +1462,10 @@ class LayercodeClient implements ILayercodeClient {
     // If user was speaking when VAD is destroyed, send synthetic vad_end to server
     // This ensures the server receives vad_end even when VAD is destroyed mid-speech
     // (e.g., due to mute, device change, or disconnect)
-    if (this.userIsSpeaking) {
+    // Only send if VAD is actually running (not for push-to-talk which uses trigger.turn events)
+    if (this.userIsSpeaking && this.vad) {
       console.debug('[Layercode]: sending synthetic vad_end (VAD destroyed mid-speech)');
+      this._setUserSpeaking(false); // Update state before callbacks (consistent with onSpeechEnd)
       const vadEndMessage: ClientVadEventsMessage = {
         type: 'vad_events',
         event: 'vad_end',
@@ -1471,7 +1473,7 @@ class LayercodeClient implements ILayercodeClient {
       this._wsSend(vadEndMessage);
       this.options.onMessage({
         ...vadEndMessage,
-        userSpeaking: false,
+        userSpeaking: this.userIsSpeaking,
       });
     }
 
