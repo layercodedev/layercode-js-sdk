@@ -1459,6 +1459,22 @@ class LayercodeClient implements ILayercodeClient {
    * Disconnect VAD
    */
   private stopVad(): void {
+    // If user was speaking when VAD is destroyed, send synthetic vad_end to server
+    // This ensures the server receives vad_end even when VAD is destroyed mid-speech
+    // (e.g., due to mute, device change, or disconnect)
+    if (this.userIsSpeaking) {
+      console.debug('[Layercode]: sending synthetic vad_end (VAD destroyed mid-speech)');
+      const vadEndMessage: ClientVadEventsMessage = {
+        type: 'vad_events',
+        event: 'vad_end',
+      };
+      this._wsSend(vadEndMessage);
+      this.options.onMessage({
+        ...vadEndMessage,
+        userSpeaking: false,
+      });
+    }
+
     if (this.vad) {
       this.vad.pause();
       this.vad.destroy();
